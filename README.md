@@ -14,6 +14,9 @@ pnpm db:migrate
 pnpm dev                   # every service, watch mode
 ```
 
+To keep a stable signing key across restarts, run `pnpm --filter @zoomclone/tokens gen-key` and put
+the PEM in `SIGNING_KEY_PEM` (multi-line values need quoting in `.env`).
+
 ## Test
 
 ```sh

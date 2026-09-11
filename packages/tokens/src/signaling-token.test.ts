@@ -19,10 +19,19 @@ describe("signaling token", () => {
     const keys = await loadSigningKeys({ kid: "test-1" });
     const now = new Date("2026-09-10T09:00:00Z");
     const token = await signSignalingToken(keys, "meeting-api", claims, now);
-    expect(decodeProtectedHeader(token)).toMatchObject({ alg: "ES256", kid: "test-1" });
+    expect(decodeProtectedHeader(token).alg).toBe("ES256");
+    expect(decodeProtectedHeader(token).kid).toMatch(/^test-1-[0-9A-Za-z_-]{8}$/);
     const verified = await verifySignalingToken(token, keys.publicKey, "meeting-api", now);
     expect(verified).toMatchObject(claims);
     expect(verified.exp - verified.iat).toBe(300);
+  });
+
+  it("derives a different kid for each ephemeral key so restarts never reuse a stale kid", async () => {
+    const first = await loadSigningKeys({ kid: "x" });
+    const second = await loadSigningKeys({ kid: "x" });
+    expect(first.kid).not.toBe(second.kid);
+    expect(first.kid).toMatch(/^x-[0-9A-Za-z_-]{8}$/);
+    expect(second.kid).toMatch(/^x-[0-9A-Za-z_-]{8}$/);
   });
 
   it("rejects expired tokens, wrong issuer and wrong audience", async () => {

@@ -17,7 +17,8 @@ describe("auth", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json<{ keys: Array<Record<string, unknown>> }>();
     expect(body.keys).toHaveLength(1);
-    expect(body.keys[0]).toMatchObject({ kid: ctx.env.SIGNING_KID, alg: "ES256", kty: "EC" });
+    expect(body.keys[0]).toMatchObject({ alg: "ES256", kty: "EC" });
+    expect(String(body.keys[0]?.kid)).toMatch(new RegExp(`^${ctx.env.SIGNING_KID}-`));
     expect(body.keys[0]).not.toHaveProperty("d");
   });
 
