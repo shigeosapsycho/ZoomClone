@@ -59,10 +59,11 @@ export class RoomRegistry {
   private readonly pending = new Map<string, Promise<RoomController>>();
   private closing = false;
 
+  private readonly onCtlMessage = (channel: string, message: string): void =>
+    this.onCtl(channel, message);
+
   constructor(private readonly deps: RegistryDeps) {
-    deps.subscriber.on("message", (channel: string, message: string) =>
-      this.onCtl(channel, message),
-    );
+    deps.subscriber.on("message", this.onCtlMessage);
   }
 
   get size(): number {
@@ -89,6 +90,7 @@ export class RoomRegistry {
   /** Graceful shutdown: controllers flush and release without ending their rooms. */
   async closeAll(): Promise<void> {
     this.closing = true;
+    this.deps.subscriber.off("message", this.onCtlMessage);
     await Promise.allSettled([...this.pending.values()]);
     await Promise.all([...this.controllers.values()].map((c) => c.close()));
   }

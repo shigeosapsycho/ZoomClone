@@ -159,6 +159,8 @@ class Connection {
       Math.max(50, Math.floor(deps.env.PING_TIMEOUT_MS / 3)),
     );
     ws.on("message", (data) => {
+      // Any inbound frame proves the peer is alive, even while earlier frames wait on the SFU.
+      this.lastPingAt = Date.now();
       this.queue = this.queue
         .then(() => this.onMessage(data))
         .catch((error: unknown) =>
