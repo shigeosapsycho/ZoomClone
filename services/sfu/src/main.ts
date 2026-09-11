@@ -1,4 +1,5 @@
 import type { Http2Server } from "node:http2";
+import type { types as ms } from "mediasoup";
 import pino from "pino";
 import { createSfuServer } from "./app";
 import { loadEnv } from "./env";
@@ -15,9 +16,10 @@ const log = pino(
 
 type App = { slots: WorkerSlot[]; manager: RoomManager; server: Http2Server };
 
-// Assigned once startup completes; the signal handlers below are registered before that, so a
-// signal that arrives during startup finds nothing to close and just exits.
+// Assigned once startup completes. The signal handlers below are registered before that; a signal
+// during startup closes whatever worker processes exist so far (workersSoFar) and exits.
 let app: App | undefined;
+const workersSoFar: ms.Worker[] = [];
 let shuttingDown = false;
 
 /**
@@ -36,6 +38,9 @@ async function shutdown(signal: string): Promise<void> {
   log.info({ signal }, "shutting down");
   const running = app;
   running?.manager.closeAllocated();
+  // process.exit() inside a signal listener pre-empts mediasoup's own listeners, so workers that
+  // exist before the app is assembled must be closed here or their processes outlive ours.
+  if (!running) for (const worker of workersSoFar) worker.close();
   try {
     if (running) {
       await running.manager.closeAll();
@@ -51,7 +56,7 @@ async function shutdown(signal: string): Promise<void> {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-const slots = await createWorkers(env, log);
+const slots = await createWorkers(env, log, (worker) => workersSoFar.push(worker));
 const manager = new RoomManager(slots, roomOptionsFrom(env, log));
 const server = createSfuServer(manager, createMetrics(manager));
 app = { slots, manager, server };

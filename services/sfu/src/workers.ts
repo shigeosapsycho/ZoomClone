@@ -15,7 +15,12 @@ export type WorkerSlot = {
  * One worker per slot, one WebRtcServer per worker so every transport on that worker shares a
  * single UDP and TCP port (SFU_MEDIA_PORT_BASE + index). Docker and Windows friendly.
  */
-export async function createWorkers(env: Env, log: Logger): Promise<WorkerSlot[]> {
+export async function createWorkers(
+  env: Env,
+  log: Logger,
+  /** Called as soon as each worker process exists, so a shutdown during startup can close it. */
+  onWorker?: (worker: ms.Worker) => void,
+): Promise<WorkerSlot[]> {
   const slots: WorkerSlot[] = [];
   for (let index = 0; index < env.SFU_WORKERS; index++) {
     const worker = await mediasoup.createWorker({
@@ -23,6 +28,7 @@ export async function createWorkers(env: Env, log: Logger): Promise<WorkerSlot[]
       logTags: ["info", "ice", "dtls", "rtp", "srtp", "rtcp"],
       appData: { index },
     });
+    onWorker?.(worker);
     worker.on("died", (error) => {
       // fatal flushes synchronously, so the line survives the exit that follows it.
       log.fatal({ err: error, index, pid: worker.pid }, "mediasoup worker died");

@@ -1,16 +1,18 @@
+import type { types as ms } from "mediasoup";
 import pino from "pino";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadEnv } from "./env";
 import { closeWorkers, createWorkers, pickWorker, type WorkerSlot } from "./workers";
 
 let slots: WorkerSlot[] = [];
+const seen: ms.Worker[] = [];
 
 beforeAll(async () => {
   const env = loadEnv({
     SFU_WORKERS: "2",
     SFU_MEDIA_PORT_BASE: String(42000 + Math.floor(Math.random() * 900)),
   });
-  slots = await createWorkers(env, pino({ level: "silent" }));
+  slots = await createWorkers(env, pino({ level: "silent" }), (worker) => seen.push(worker));
 });
 
 afterAll(async () => {
@@ -25,6 +27,10 @@ describe("workers", () => {
       expect(slot.webRtcServer.closed).toBe(false);
       expect(slot.rooms).toBe(0);
     }
+  });
+
+  it("reports each worker process as soon as it exists", () => {
+    expect(seen.map((w) => w.pid)).toEqual(slots.map((s) => s.worker.pid));
   });
 
   it("picks the least loaded worker", () => {
