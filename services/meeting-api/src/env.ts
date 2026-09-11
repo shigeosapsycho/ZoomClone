@@ -26,6 +26,15 @@ export const EnvSchema = z
     OIDC_ISSUER: z.string().optional(),
     OIDC_AUDIENCE: z.string().default("zoomclone"),
     OIDC_JWKS_URL: z.string().optional(),
+    OIDC_ALGORITHMS: z
+      .string()
+      .default("RS256,ES256")
+      .transform((s) =>
+        s
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean),
+      ),
     DEFAULT_ORG_ID: z.uuid().default("11111111-1111-4111-8111-111111111111"),
     DEFAULT_REGION: z.string().default("local"),
     SFU_ID: z.string().default("sfu-local-1"),

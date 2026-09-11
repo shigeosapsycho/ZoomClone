@@ -18,18 +18,21 @@ export class OidcUserVerifier implements UserVerifier {
       key: webcrypto.CryptoKey | JWTVerifyGetKey;
       issuer: string;
       audience: string;
+      algorithms: string[];
       defaultOrgId: string;
     },
   ) {}
 
   async verify(bearer: string): Promise<AuthUser> {
-    const { key, issuer, audience } = this.opts;
+    const { key, issuer, audience, algorithms } = this.opts;
     let payload: JWTPayload;
     try {
+      // Both branches call jwtVerify the same way; the split only exists so TS resolves
+      // the right overload for the key union (a raw CryptoKey vs. a JWTVerifyGetKey resolver).
       ({ payload } =
         typeof key === "function"
-          ? await jwtVerify(bearer, key, { issuer, audience })
-          : await jwtVerify(bearer, key, { issuer, audience }));
+          ? await jwtVerify(bearer, key, { issuer, audience, algorithms })
+          : await jwtVerify(bearer, key, { issuer, audience, algorithms }));
     } catch {
       throw new ApiError("UNAUTHORIZED", "invalid bearer token");
     }
@@ -49,6 +52,7 @@ export function createUserVerifier(env: Env, keys: SigningKeys): UserVerifier {
       key: keys.publicKey,
       issuer: env.DEV_ISSUER_URL,
       audience: env.OIDC_AUDIENCE,
+      algorithms: ["ES256"],
       defaultOrgId: env.DEFAULT_ORG_ID,
     });
   }
@@ -56,6 +60,7 @@ export function createUserVerifier(env: Env, keys: SigningKeys): UserVerifier {
     key: createRemoteJWKSet(new URL(env.OIDC_JWKS_URL as string)),
     issuer: env.OIDC_ISSUER as string,
     audience: env.OIDC_AUDIENCE,
+    algorithms: env.OIDC_ALGORITHMS,
     defaultOrgId: env.DEFAULT_ORG_ID,
   });
 }

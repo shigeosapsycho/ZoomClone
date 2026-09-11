@@ -63,6 +63,20 @@ describe("auth", () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it("rejects tokens whose algorithm is not allowed", async () => {
+    const { privateKey } = await generateKeyPair("RS256");
+    const forged = await new SignJWT({})
+      .setProtectedHeader({ alg: "RS256" })
+      .setIssuer(ctx.env.DEV_ISSUER_URL)
+      .setAudience(ctx.env.OIDC_AUDIENCE)
+      .setSubject("2f6a2b6e-6f0b-4c1e-9a52-0c5d3f1a9b12")
+      .setIssuedAt()
+      .setExpirationTime("1h")
+      .sign(privateKey);
+    const res = await ctx.app.inject({ method: "GET", url: "/v1/me", headers: bearer(forged) });
+    expect(res.statusCode).toBe(401);
+  });
+
   it("does not serve the dev issuer when it is disabled", async () => {
     const prod = await createTestContext({
       AUTH_DEV_ISSUER: "false",
