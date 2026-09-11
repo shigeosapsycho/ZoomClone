@@ -354,6 +354,9 @@ stream simply ends when the room closes.
   reconnect with `resume_seq` + `epoch`, transport rebuild when `resync.media` ids change. Exposes
   `window.__harness` (roster, tracks, seq, epoch, last events, consumer ids, per-consumer
   `getStats` helper) for Playwright.
+  Shipped as "the gallery": monitor tiles with tally lamps and audio meters, a green room, talk,
+  a control strip and a tape of signaling events; `window.__harness` exposes the room view,
+  events, snapshots, consumers, stats, frame counters and a socket drop for Playwright.
 - `metrics.ts`: `ws_connections`, `room_count`, `checkpoint_lag_ms`, `resync_total`,
   `failover_total`.
 
@@ -397,7 +400,9 @@ chat persistence, OTel tracing, Dockerfiles / K8s, webinar mode, dead-media-path
 
 - `docker compose up -d` then `pnpm db:migrate` then `pnpm check` (typecheck, prettier, vitest
   unit + integration across all packages) must pass.
-- `pnpm test:e2e` runs the nine Playwright scenarios headless on Chromium.
+- `pnpm test:e2e` spawns the three services and runs the nine Playwright scenarios headless on
+  Chromium with fake devices (a generated 440 Hz tone with a slow amplitude wobble as the
+  microphone, since Chromium's noise suppression flattens a steady sine).
 - Manual: `pnpm dev`, open `http://localhost:8081/dev/` in two browser windows, create a meeting
   with a dev token, join by code from both, confirm two-way video, mute, hand, chat, host controls,
   active speaker highlight; kill the signaling process and restart it, confirm both windows

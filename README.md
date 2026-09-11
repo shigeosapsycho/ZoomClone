@@ -93,3 +93,34 @@ owner lease keeps one controller per room. Kill and restart the process: clients
 room rehydrates from Redis plus the SFU snapshot with a new `epoch`, and they receive a `resync`.
 Attendance rows and session end are written to Postgres by the bus consumer in `src/writer`.
 Verify the JWT issuer: `TOKEN_ISSUER` must match meeting-api's value (default `meeting-api`).
+
+## Client (the gallery) and end-to-end tests
+
+With `DEV_HARNESS=true` the signaling service serves the browser client at
+`http://localhost:8081/dev/`: a broadcast-gallery view of the room (monitor tiles with tally lamps
+and audio meters, the green room, talk, the control strip, and a tape of the signaling events).
+Create a meeting with a dev host token, then join from two browser windows with the room code:
+
+```sh
+pnpm dev                                                    # all three services
+TOKEN=$(curl -s -X POST localhost:8080/dev/oidc/token -H 'content-type: application/json' \
+  -d '{"sub":"11111111-1111-4111-8111-111111111111","name":"Host"}' | jq -r .access_token)
+curl -s -X POST localhost:8080/v1/meetings -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"title":"hello"}' | jq .code
+```
+
+Paste the token into "host token" on the join screen to join as the host (the green room, mute,
+remove, lock and end are host controls).
+
+The Playwright suite spawns the three services itself (ports 8080, 8081, 9090, media 43000) and
+drives Chromium with fake devices through nine scenarios: a three-party call, the green room,
+host controls, active speakers, layer preferences, reconnect with replay, a signaling restart
+with rehydrate, idle end, and the `/join` error codes.
+
+```sh
+pnpm infra:up
+pnpm e2e:install            # once: downloads Chromium
+pnpm test:e2e
+```
+
+`pnpm check` never runs the browser suite.
