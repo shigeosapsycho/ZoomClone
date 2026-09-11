@@ -12,7 +12,8 @@ import {
 
 export type ConnectionStatus =
   "connecting" | "hello" | "lobby" | "joined" | "reconnecting" | "closed";
-export type CloseInfo = { code: number; reason: string; terminal: boolean };
+/** chosen: the close follows leave(), whatever code the socket reports (1006 while connecting). */
+export type CloseInfo = { code: number; reason: string; terminal: boolean; chosen: boolean };
 export type RequestType = Exclude<ClientMessage["type"], "hello" | "ping">;
 export type PayloadOf<T extends ClientMessage["type"]> = Extract<
   ClientMessage,
@@ -200,8 +201,8 @@ export class SignalingClient {
       this.backoff = BACKOFF_MIN_MS;
       if (ack.data.mode === "replay") {
         // Nothing else announces the resumed session: the state is whatever it was, plus the
-        // replayed events. The server's cursor is authoritative for the next resume.
-        this._seq = Math.max(this._seq, ack.data.seq);
+        // replayed events, which advance the cursor as they land. The ack's seq is the head and
+        // must not move it: a second drop before the tail arrived would skip the rest.
         this.setStatus(this._status === "lobby" ? "lobby" : "joined");
         this.hello = null;
       }
@@ -246,19 +247,24 @@ export class SignalingClient {
   private onClose(socket: WebSocket, code: number, reason: string): void {
     if (this.socket !== socket) return;
     this.socket = null;
+    // An ack whose welcome or resync never arrived: the client holds an epoch it has no state
+    // for, so the next hello starts fresh and the server answers with a full snapshot, not a
+    // replay (which carries no media).
+    if (this.hello?.mode === "welcome" || this.hello?.mode === "resync") this._epoch = null;
     this.hello = null;
     this.clearTimers();
     for (const pending of this.pending.values())
       pending.reject(new RequestError("CLOSED", `socket closed (${code})`));
     this.pending.clear();
-    const terminal = this.stopped || TERMINAL_CLOSE_CODES.has(code);
+    const chosen = this.stopped;
+    const terminal = chosen || TERMINAL_CLOSE_CODES.has(code);
     if (terminal) {
       this.stopped = true;
       this.setStatus("closed");
-      this.opts.onClosed({ code, reason, terminal: true });
+      this.opts.onClosed({ code, reason, terminal: true, chosen });
       return;
     }
-    this.opts.onClosed({ code, reason, terminal: false });
+    this.opts.onClosed({ code, reason, terminal: false, chosen: false });
     this.setStatus("reconnecting");
     const delay = code === DROP_CODE ? 0 : this.backoff;
     this.backoff = Math.min(this.backoff * 2, BACKOFF_MAX_MS);

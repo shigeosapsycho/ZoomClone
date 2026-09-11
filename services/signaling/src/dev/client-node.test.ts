@@ -119,10 +119,14 @@ describe("SignalingClient", () => {
     ann.client.drop();
     await host.client.request("reaction", { emoji: "wave" });
     await waitFor(() => ann.client.lastAck?.mode === "replay");
-    await waitFor(() => ann.events.some((e) => e.type === "reaction"));
+    const reaction = await waitFor(() => ann.events.find((e) => e.type === "reaction"));
     expect(ann.snapshots).toHaveLength(1);
     expect(ann.statuses).toContain("reconnecting");
     expect(ann.client.status).toBe("joined");
+    // The cursor follows the events Ann received, never the ack's head: her own reconnect event
+    // goes to everyone but her, so the head sits past the last event she is sent.
+    expect(ann.client.seq).toBe(reaction!.seq);
+    expect(ann.client.lastAck!.seq).toBeGreaterThanOrEqual(reaction!.seq);
 
     // The controller goes away (as on a process restart) while the registry stays: the next hello
     // rehydrates the room from Redis with a new epoch, so the client is answered with a resync.
@@ -130,6 +134,43 @@ describe("SignalingClient", () => {
     await waitFor(() => ann.snapshots.length === 2, 5_000);
     expect(ann.snapshots[1]).toMatchObject({ kind: "resync", welcome: { epoch: 2 } });
     expect(ann.client.epoch).toBe(2);
+  });
+
+  it("keeps a consumer's binding across a drop until a subscribe without its track, then recreates it", async () => {
+    const host = await open(HOST, "host");
+    const ann = await open(A);
+    const published = await host.client.request("publish", {
+      kind: "video",
+      source: "camera",
+      rtp_parameters: { codecs: [] },
+      paused: false,
+    });
+    const trackId = String(published["track_id"]);
+    await waitFor(() => ann.events.some((e) => e.type === "track.added"));
+    const subscribe = (trackIds: string[]) =>
+      ann.client.request("subscribe", {
+        rtp_capabilities: { codecs: [] },
+        track_ids: trackIds,
+        prefs: {},
+      }) as Promise<{
+        consumers: Array<{ track_id: string; consumer_id: string }>;
+        removed: string[];
+      }>;
+    const first = await subscribe([trackId]);
+    expect(first.consumers.map((c) => c.track_id)).toEqual([trackId]);
+    const firstConsumer = first.consumers[0]!.consumer_id;
+
+    // The socket goes before the ack would have landed; the server keeps the binding.
+    ann.client.drop();
+    await waitFor(() => ann.client.lastAck?.mode === "replay");
+    // Declarative full set: an existing binding gets its prefs updated and is not echoed back...
+    expect(await subscribe([trackId])).toEqual({ consumers: [], removed: [] });
+    // ...so a client that never saw it asks without the track first, then with it again.
+    expect(await subscribe([])).toEqual({ consumers: [], removed: [trackId] });
+    const recreated = await subscribe([trackId]);
+    expect(recreated.consumers.map((c) => c.track_id)).toEqual([trackId]);
+    expect(recreated.consumers[0]!.consumer_id).not.toBe(firstConsumer);
+    expect(sfu.callsTo("unsubscribe").map((c) => c.request["consumerId"])).toEqual([firstConsumer]);
   });
 
   it("stops on terminal closes and rejects pending requests", async () => {

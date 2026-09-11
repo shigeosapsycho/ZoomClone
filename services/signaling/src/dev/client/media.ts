@@ -1,6 +1,6 @@
 import { Device, type types as msc } from "mediasoup-client";
 import type { ConsumerParams, MediaKind, MediaParams, SubscriptionPref } from "@zoomclone/protocol";
-import { RequestError, type SignalingClient } from "./signaling";
+import { RequestError, type PayloadOf, type SignalingClient } from "./signaling";
 
 export type LocalTracks = { audio: MediaStreamTrack | null; video: MediaStreamTrack | null };
 export type RemoteFeed = {
@@ -24,6 +24,22 @@ export const SIMULCAST_ENCODINGS: RTCRtpEncodingParameters[] = [
 ];
 
 type Opaque = Record<string, unknown>;
+type SubscribeAck = { consumers: ConsumerParams[]; removed: string[] };
+type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
+async function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
+  try {
+    return { ok: true, value: await promise };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+function describeFailure(settled: Settled<unknown>): string {
+  if (settled.ok) return "no track";
+  const { error } = settled;
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
 
 /**
  * mediasoup-client glue: transports from welcome.media, local producers, declarative consumers.
@@ -32,11 +48,21 @@ type Opaque = Record<string, unknown>;
  */
 export class MediaSession {
   private device: Device | null = null;
+  /** The router capabilities the device was loaded with, as JSON: a rebuild may carry new ones. */
+  private deviceCapabilities: string | null = null;
   private send: msc.Transport | null = null;
   private recv: msc.Transport | null = null;
   private transportIds: { send: string; recv: string } | null = null;
   private producers = new Map<MediaKind, { producer: msc.Producer; trackId: string }>();
   private consumers = new Map<string, msc.Consumer>();
+  /**
+   * Track ids whose consumer state at the server the client cannot trust: a subscribe the socket
+   * closed on may have been applied without the ack arriving, and a consumer dropped after a
+   * failed consumer_ready keeps its binding server side. The declarative ack lists only the
+   * consumers a call creates, so a plain full-set subscribe would never return these; doSubscribe
+   * unsubscribes them first and asks for the full set after.
+   */
+  private inDoubt = new Set<string>();
   private desired: string[] = [];
   private prefs: Record<string, SubscriptionPref> = {};
   private local: LocalTracks = { audio: null, video: null };
@@ -72,11 +98,14 @@ export class MediaSession {
     }
     const rebuilt = this.transportIds !== null;
     this.teardownTransports();
-    if (!this.device) {
-      this.device = new Device();
-      await this.device.load({
-        routerRtpCapabilities: media.rtp_capabilities as msc.RtpCapabilities,
-      });
+    const capabilities = JSON.stringify(media.rtp_capabilities);
+    if (!this.device || this.deviceCapabilities !== capabilities) {
+      // A rebuild after an SFU restart can carry other router capabilities (a codec or an
+      // extension map); a Device loaded with the old ones would consume with stale parameters.
+      const device = new Device();
+      await device.load({ routerRtpCapabilities: media.rtp_capabilities as msc.RtpCapabilities });
+      this.device = device;
+      this.deviceCapabilities = capabilities;
     }
     this.send = this.device.createSendTransport({
       ...transportOptions(media.send_transport),
@@ -98,15 +127,22 @@ export class MediaSession {
     return "created";
   }
 
+  /** Mic and camera are asked for one at a time: a machine missing one still joins with the other. */
   async captureLocal(): Promise<LocalTracks> {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-    });
+    const devices = navigator.mediaDevices;
+    const audio = await settle(devices.getUserMedia({ audio: true }));
+    const video = await settle(
+      devices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } } }),
+    );
     this.local = {
-      audio: stream.getAudioTracks()[0] ?? null,
-      video: stream.getVideoTracks()[0] ?? null,
+      audio: audio.ok ? (audio.value.getAudioTracks()[0] ?? null) : null,
+      video: video.ok ? (video.value.getVideoTracks()[0] ?? null) : null,
     };
+    if (!this.local.audio && !this.local.video) {
+      throw new Error(
+        `no microphone or camera (mic: ${describeFailure(audio)}; camera: ${describeFailure(video)})`,
+      );
+    }
     return this.local;
   }
 
@@ -145,18 +181,36 @@ export class MediaSession {
     }
   }
 
-  async setMuted(muted: boolean): Promise<void> {
-    this.state.muted = muted;
-    const audio = this.producers.get("audio");
-    if (audio) muted ? audio.producer.pause() : audio.producer.resume();
-    await this.signaling.request("set_media_state", { muted });
+  setMuted(muted: boolean): Promise<void> {
+    return this.setPaused("audio", "muted", muted, { muted });
   }
 
-  async setVideoOff(videoOff: boolean): Promise<void> {
-    this.state.videoOff = videoOff;
-    const video = this.producers.get("video");
-    if (video) videoOff ? video.producer.pause() : video.producer.resume();
-    await this.signaling.request("set_media_state", { video_off: videoOff });
+  setVideoOff(videoOff: boolean): Promise<void> {
+    return this.setPaused("video", "videoOff", videoOff, { video_off: videoOff });
+  }
+
+  /**
+   * Pauses at once (muting must not wait for a round trip) and tells the server; a refused
+   * request puts the producer and the flag back, so the rocker keeps telling the truth.
+   */
+  private async setPaused(
+    kind: MediaKind,
+    flag: "muted" | "videoOff",
+    paused: boolean,
+    payload: PayloadOf<"set_media_state">,
+  ): Promise<void> {
+    const entry = this.producers.get(kind);
+    const previous = { flag: this.state[flag], paused: entry?.producer.paused ?? null };
+    this.state[flag] = paused;
+    if (entry) paused ? entry.producer.pause() : entry.producer.resume();
+    try {
+      await this.signaling.request("set_media_state", payload);
+    } catch (error) {
+      this.state[flag] = previous.flag;
+      if (entry && previous.paused !== null)
+        previous.paused ? entry.producer.pause() : entry.producer.resume();
+      throw error;
+    }
   }
 
   /** The roster is the truth (a host mute pauses the producer server side): mirror it locally. */
@@ -184,40 +238,74 @@ export class MediaSession {
     const recv = this.recv;
     const device = this.device;
     if (!recv || !device) return;
-    const ack = (await this.signaling.request("subscribe", {
-      rtp_capabilities: device.rtpCapabilities as Opaque,
-      track_ids: trackIds,
-      prefs,
-    })) as { consumers: ConsumerParams[]; removed: string[] };
-    for (const trackId of ack.removed) this.dropConsumer(trackId);
-    for (const params of ack.consumers) {
-      const consumer = await recv.consume({
-        id: params.consumer_id,
-        producerId: params.producer_id,
-        kind: params.kind,
-        rtpParameters: params.rtp_parameters as unknown as msc.RtpParameters,
-        appData: { trackId: params.track_id },
-      });
-      this.consumers.set(params.track_id, consumer);
-      consumer.on("transportclose", () => this.dropConsumer(params.track_id));
-      this.events.onFeed({
-        trackId: params.track_id,
-        kind: params.kind,
-        consumerId: consumer.id,
-        track: consumer.track,
-      });
-      try {
-        await this.signaling.request("consumer_ready", { track_id: params.track_id });
-      } catch (error) {
-        if (error instanceof RequestError && error.code === "NOT_FOUND") continue;
-        // Left in place it would stay paused for good; dropping it makes the next subscribe recreate it.
-        this.dropConsumer(params.track_id);
-        throw error;
-      }
+    if (this.inDoubt.size > 0) {
+      // Two steps: first the set without the doubtful ids, so the server drops whatever it still
+      // holds for them, then the full set, which creates them afresh and returns their params.
+      const trimmed = trackIds.filter((trackId) => !this.inDoubt.has(trackId));
+      await this.sendSubscribe(recv, device, trimmed, prefs);
+      this.inDoubt.clear();
     }
+    await this.sendSubscribe(recv, device, trackIds, prefs);
     // Tracks the server no longer knows (removed while we were away) get no consumer; drop stale ones.
     for (const trackId of [...this.consumers.keys()]) {
       if (!this.desired.includes(trackId)) this.dropConsumer(trackId);
+    }
+  }
+
+  /** One declarative subscribe: consumes what the ack created and reports each consumer ready. */
+  private async sendSubscribe(
+    recv: msc.Transport,
+    device: Device,
+    trackIds: string[],
+    prefs: Record<string, SubscriptionPref>,
+  ): Promise<void> {
+    let ack: SubscribeAck;
+    try {
+      ack = (await this.signaling.request("subscribe", {
+        rtp_capabilities: device.rtpCapabilities as Opaque,
+        track_ids: trackIds,
+        prefs,
+      })) as SubscribeAck;
+    } catch (error) {
+      // The server may have applied it (a socket that closed before the ack): whatever was asked
+      // for and is not held cannot be trusted either way.
+      for (const trackId of trackIds) if (!this.consumers.has(trackId)) this.inDoubt.add(trackId);
+      throw error;
+    }
+    for (const trackId of ack.removed) this.dropConsumer(trackId);
+    try {
+      for (const params of ack.consumers) {
+        const consumer = await recv.consume({
+          id: params.consumer_id,
+          producerId: params.producer_id,
+          kind: params.kind,
+          rtpParameters: params.rtp_parameters as unknown as msc.RtpParameters,
+          appData: { trackId: params.track_id },
+        });
+        this.consumers.set(params.track_id, consumer);
+        consumer.on("transportclose", () => this.dropConsumer(params.track_id));
+        this.events.onFeed({
+          trackId: params.track_id,
+          kind: params.kind,
+          consumerId: consumer.id,
+          track: consumer.track,
+        });
+        try {
+          await this.signaling.request("consumer_ready", { track_id: params.track_id });
+        } catch (error) {
+          if (error instanceof RequestError && error.code === "NOT_FOUND") continue;
+          // Left in place it would stay paused for good (the server unpauses on consumer_ready).
+          // Dropped, its binding stays at the server: the next subscribe recreates it in two
+          // steps (see doSubscribe).
+          this.dropConsumer(params.track_id);
+          throw error;
+        }
+      }
+    } catch (error) {
+      // Every consumer this ack created and the client does not hold has a binding it cannot see.
+      for (const params of ack.consumers)
+        if (!this.consumers.has(params.track_id)) this.inDoubt.add(params.track_id);
+      throw error;
     }
   }
 
