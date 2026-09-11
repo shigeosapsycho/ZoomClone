@@ -196,6 +196,16 @@ export class Checkpoint {
     this.stopped = true;
   }
 
+  /**
+   * Ownership was lost: cancel the pending write and never touch the keys again. No flush, the
+   * new owner's checkpoint is the truth now (a write already in flight cannot be recalled).
+   */
+  abandon(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.stopped = true;
+  }
+
   private async write(dirty: Set<Section>): Promise<void> {
     if (this.stopped) return;
     const s = this.room.toSnapshot();

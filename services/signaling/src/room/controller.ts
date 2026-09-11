@@ -147,7 +147,12 @@ export class RoomController {
 
   /** AllocateRoom, first Stats snapshot (reconciled), initial checkpoint, timers. */
   async start(): Promise<void> {
-    await this.stats.start();
+    try {
+      await this.stats.start();
+    } catch (error) {
+      this.stats.stop();
+      throw error;
+    }
     await this.deps.checkpoint.writeAll();
     this.heartbeat = setInterval(() => void this.heartbeatTick(), this.deps.timings.heartbeatMs);
     this.speakerTimer = setInterval(
@@ -177,8 +182,13 @@ export class RoomController {
     hello: HelloPayload,
   ): Promise<string | null> {
     const pid = claims.participant_id;
-    if (this.gone || this.room.status === "ended") {
+    if (this.room.status === "ended") {
       link.close(CloseCode.ROOM_ENDED, "room ended");
+      return null;
+    }
+    if (this.gone) {
+      // 4004 is terminal for clients; a closed controller only means "come back" (registry rehydrate).
+      link.close(1012, "controller restarting");
       return null;
     }
     const departed = this.room.departed(pid);
@@ -214,10 +224,11 @@ export class RoomController {
     const media = await this.ensureTransports(pid);
     if (!this.room.inRoster(pid)) {
       await this.closeTransports(pid);
+      const departed = this.room.departed(pid);
       throw new RoomFailure({
         code: "NOT_FOUND",
         message: "left the room during hello",
-        close: CloseCode.REJOIN_REQUIRED,
+        close: departed ? CLOSE_BY_DEPARTED[departed] : CloseCode.REJOIN_REQUIRED,
       });
     }
     this.takeover(pid, link);
@@ -336,7 +347,7 @@ export class RoomController {
       return;
     }
     link.send({ type: "ack", id: message.id, payload: reply.ack });
-    if (reply.after) await reply.after();
+    if (reply.after) await reply.after().catch((e: unknown) => this.warn("after hook failed", e));
   }
 
   private async dispatch(pid: string, message: ControllerMessage): Promise<Reply> {
@@ -434,12 +445,25 @@ export class RoomController {
       participantId: pid,
       direction: direction === "send" ? TransportDirection.SEND : TransportDirection.RECV,
     });
-    return {
-      id: res.transportId,
-      ice_parameters: parseObject(res.iceParametersJson, "ice parameters"),
-      ice_candidates: parseArray(res.iceCandidatesJson, "ice candidates"),
-      dtls_parameters: parseObject(res.dtlsParametersJson, "dtls parameters"),
-    };
+    try {
+      return {
+        id: res.transportId,
+        ice_parameters: parseObject(res.iceParametersJson, "ice parameters"),
+        ice_candidates: parseArray(res.iceCandidatesJson, "ice candidates"),
+        dtls_parameters: parseObject(res.dtlsParametersJson, "dtls parameters"),
+      };
+    } catch (error) {
+      // The transport exists at the SFU but nobody will ever learn its id: close it now.
+      await this.closeTransportQuietly(res.transportId);
+      throw error;
+    }
+  }
+
+  /** Cleanup call that tolerates NOT_FOUND (the SFU already dropped it) and logs anything else. */
+  private async closeTransportQuietly(transportId: string): Promise<void> {
+    await this.deps.sfu.closeTransport({ transportId }).catch((error: unknown) => {
+      if (!isNotFound(error)) this.warn("closeTransport failed", error);
+    });
   }
 
   /** Both transports or none (design doc ordering rule): a failed second call closes the first. */
@@ -449,9 +473,7 @@ export class RoomController {
     try {
       recv = await this.createTransport(pid, "recv");
     } catch (error) {
-      await this.deps.sfu
-        .closeTransport({ transportId: send.id })
-        .catch((e: unknown) => this.warn("rollback closeTransport failed", e));
+      await this.closeTransportQuietly(send.id);
       throw error;
     }
     this.bindings.setTransports(pid, { send, recv });
@@ -471,25 +493,36 @@ export class RoomController {
     return this.createTransports(pid);
   }
 
+  /**
+   * Drops the participant's transports (and with them producers and consumers) at the SFU and in
+   * the bindings. The rtp capabilities the client sent survive: a reconnect that has to rebuild
+   * its transports subscribes again without resending them. Departed participants lose them
+   * through clearCapabilities at their exit points.
+   */
   private async closeTransports(pid: string): Promise<void> {
     const { send, recv } = this.bindings.transportsOf(pid);
+    const caps = this.bindings.capabilities(pid);
     this.bindings.clearParticipant(pid);
+    if (caps) this.bindings.setCapabilities(pid, caps);
     for (const transport of [send, recv]) {
-      if (!transport) continue;
-      await this.deps.sfu.closeTransport({ transportId: transport.id }).catch((error: unknown) => {
-        if (!isNotFound(error)) this.warn("closeTransport failed", error);
-      });
+      if (transport) await this.closeTransportQuietly(transport.id);
     }
+  }
+
+  /** The producer starts paused when the client asks or when the source is muted or video-off. */
+  private effectivePaused(payload: PayloadOf<"publish">, entry: RosterEntry): boolean {
+    return (
+      payload.paused ||
+      (payload.source === "mic" && entry.muted) ||
+      (payload.source === "camera" && entry.video_off)
+    );
   }
 
   private async publish(pid: string, payload: PayloadOf<"publish">): Promise<{ track_id: string }> {
     const entry = this.requireJoined(pid);
     const send = this.bindings.transport(pid, "send");
     if (!send) throw new RoomFailure({ code: "NOT_FOUND", message: "no send transport" });
-    const paused =
-      payload.paused ||
-      (payload.source === "mic" && entry.muted) ||
-      (payload.source === "camera" && entry.video_off);
+    const sentPaused = this.effectivePaused(payload, entry);
     const res = await this.deps.sfu.publish({
       sessionId: this.sessionId,
       participantId: pid,
@@ -497,8 +530,21 @@ export class RoomController {
       kind: kindToPb(payload.kind),
       source: sourceToPb(payload.source),
       rtpParametersJson: JSON.stringify(payload.rtp_parameters),
-      paused,
+      paused: sentPaused,
     });
+    // The mute state may have changed while Publish was in flight (set_media_state saw no track
+    // to pause yet): re-read it and bring the producer in line before the room learns the track.
+    let paused = sentPaused;
+    const current = this.room.rosterEntry(pid);
+    if (current && this.effectivePaused(payload, current) !== sentPaused) {
+      paused = !sentPaused;
+      try {
+        await this.deps.sfu.setProducerPaused({ producerId: res.producerId, paused });
+      } catch (error) {
+        await this.unpublishQuietly(res.producerId);
+        throw error;
+      }
+    }
     const track: TrackInfo = {
       track_id: res.trackId,
       owner: pid,
@@ -509,14 +555,19 @@ export class RoomController {
     };
     const outcome = this.room.apply({ type: "publish", participant_id: pid, track });
     if (!outcome.ok) {
-      await this.deps.sfu
-        .unpublish({ producerId: res.producerId })
-        .catch((e: unknown) => this.warn("rollback unpublish failed", e));
+      await this.unpublishQuietly(res.producerId);
       throw new RoomFailure(outcome.error);
     }
     this.bindings.addProducer(track.track_id, res.producerId, pid);
     this.afterApply(outcome.events);
     return { track_id: track.track_id };
+  }
+
+  /** Rollback of a producer the room never learned about; NOT_FOUND means the SFU beat us to it. */
+  private async unpublishQuietly(producerId: string): Promise<void> {
+    await this.deps.sfu.unpublish({ producerId }).catch((error: unknown) => {
+      if (!isNotFound(error)) this.warn("rollback unpublish failed", error);
+    });
   }
 
   private async unpublish(pid: string, trackId: string): Promise<void> {
@@ -567,41 +618,56 @@ export class RoomController {
       this.bindings.removeConsumer(binding.consumer_id);
       removed.push(trackId);
     }
-    for (const trackId of desired) {
-      const pref: SubscriptionPref = payload.prefs[trackId] ?? {};
-      const existing = this.bindings.consumerOf(pid, trackId);
-      if (existing) {
-        await this.updatePrefs(existing, pref);
-        continue;
+    // Everything created by this call goes when any later step fails: the client only learns
+    // consumer ids from the ack, so a half-applied set would leak consumers at the SFU.
+    const created: ConsumerBinding[] = [];
+    try {
+      for (const trackId of desired) {
+        const pref: SubscriptionPref = payload.prefs[trackId] ?? {};
+        const existing = this.bindings.consumerOf(pid, trackId);
+        if (existing) {
+          await this.updatePrefs(existing, pref);
+          continue;
+        }
+        const producerId = this.bindings.producerOf(trackId);
+        if (!producerId) continue;
+        const res = await this.deps.sfu.subscribe({
+          sessionId: this.sessionId,
+          participantId: pid,
+          transportId: recv.id,
+          producerId,
+          rtpCapabilitiesJson: JSON.stringify(caps),
+          maxSpatialLayer: pref.max_layer,
+          priority: pref.priority,
+        });
+        const binding: ConsumerBinding = {
+          consumer_id: res.consumerId,
+          track_id: trackId,
+          participant_id: pid,
+          producer_id: producerId,
+          ready: false,
+          paused_pref: pref.paused ?? false,
+          max_layer: pref.max_layer ?? DEFAULT_MAX_LAYER,
+          priority: pref.priority ?? DEFAULT_PRIORITY,
+        };
+        this.bindings.addConsumer(binding);
+        created.push(binding);
+        consumers.push({
+          track_id: trackId,
+          consumer_id: res.consumerId,
+          kind: kindFromPb(res.kind),
+          rtp_parameters: parseObject(res.rtpParametersJson, "rtp parameters"),
+          producer_paused: res.producerPaused,
+        });
       }
-      const producerId = this.bindings.producerOf(trackId);
-      if (!producerId) continue;
-      const res = await this.deps.sfu.subscribe({
-        sessionId: this.sessionId,
-        participantId: pid,
-        transportId: recv.id,
-        producerId,
-        rtpCapabilitiesJson: JSON.stringify(caps),
-        maxSpatialLayer: pref.max_layer,
-        priority: pref.priority,
-      });
-      this.bindings.addConsumer({
-        consumer_id: res.consumerId,
-        track_id: trackId,
-        participant_id: pid,
-        producer_id: producerId,
-        ready: false,
-        paused_pref: pref.paused ?? false,
-        max_layer: pref.max_layer ?? DEFAULT_MAX_LAYER,
-        priority: pref.priority ?? DEFAULT_PRIORITY,
-      });
-      consumers.push({
-        track_id: trackId,
-        consumer_id: res.consumerId,
-        kind: kindFromPb(res.kind),
-        rtp_parameters: parseObject(res.rtpParametersJson, "rtp parameters"),
-        producer_paused: res.producerPaused,
-      });
+    } catch (error) {
+      for (const binding of created) {
+        await this.deps.sfu.unsubscribe({ consumerId: binding.consumer_id }).catch((e: unknown) => {
+          if (!isNotFound(e)) this.warn("rollback unsubscribe failed", e);
+        });
+        this.bindings.removeConsumer(binding.consumer_id);
+      }
+      throw error;
     }
     return { consumers, removed };
   }
@@ -621,21 +687,26 @@ export class RoomController {
     }
     const paused = pref.paused ?? false;
     if (paused !== binding.paused_pref) {
-      binding.paused_pref = paused;
+      // A consumer that is not ready yet stays paused at the SFU whatever the preference says;
+      // consumer_ready applies the preference then.
       if (binding.ready)
         await this.deps.sfu.setConsumerPaused({ consumerId: binding.consumer_id, paused });
+      binding.paused_pref = paused;
     }
   }
 
+  /**
+   * The client is wired up: unpause at the SFU (unless it prefers paused), then remember it.
+   * Idempotent on purpose, so a retry after a failed unpause (or a duplicate) converges.
+   */
   private async consumerReady(pid: string, trackId: string): Promise<void> {
     const binding = this.bindings.consumerOf(pid, trackId);
     if (!binding)
       throw new RoomFailure({ code: "NOT_FOUND", message: "no consumer for that track" });
-    if (binding.ready) return;
-    binding.ready = true;
     if (!binding.paused_pref) {
       await this.deps.sfu.setConsumerPaused({ consumerId: binding.consumer_id, paused: false });
     }
+    binding.ready = true;
   }
 
   private async setMediaState(pid: string, muted?: boolean, videoOff?: boolean): Promise<void> {
@@ -669,24 +740,31 @@ export class RoomController {
 
   // ---- host controls ----
 
-  private async admit(actor: string, target: string): Promise<void> {
-    this.requireHost(actor);
-    if (!this.room.inLobby(target))
-      throw new RoomFailure({ code: "NOT_FOUND", message: "not in the lobby" });
-    if (this.room.roster().length >= this.room.maxParticipants) {
-      throw new RoomFailure({ code: "CAPACITY", message: "meeting is full" });
-    }
-    const media = await this.createTransports(target);
-    const outcome = this.room.apply({ type: "admit", actor, participant_id: target });
-    if (!outcome.ok) {
-      await this.closeTransports(target);
-      throw new RoomFailure(outcome.error);
-    }
-    this.afterApply(outcome.events);
-    this.links
-      .get(target)
-      ?.send({ type: "resync", payload: { ...this.room.welcomeFor(target), media } });
-    this.audit(actor, "admit", target);
+  /** Under the target's lock: a second admit, a hello or a grace expiry for it waits its turn. */
+  private admit(actor: string, target: string): Promise<void> {
+    return this.withLock(target, async () => {
+      this.requireHost(actor);
+      if (!this.room.inLobby(target))
+        throw new RoomFailure({ code: "NOT_FOUND", message: "not in the lobby" });
+      if (this.room.roster().length >= this.room.maxParticipants) {
+        throw new RoomFailure({ code: "CAPACITY", message: "meeting is full" });
+      }
+      const media = await this.createTransports(target);
+      const outcome = this.room.apply({ type: "admit", actor, participant_id: target });
+      if (!outcome.ok) {
+        // Undo exactly this call's transports; anything else the target owns is not ours to close.
+        for (const id of [media.send_transport.id, media.recv_transport.id]) {
+          await this.closeTransportQuietly(id);
+          this.bindings.removeTransport(id);
+        }
+        throw new RoomFailure(outcome.error);
+      }
+      this.afterApply(outcome.events);
+      this.links
+        .get(target)
+        ?.send({ type: "resync", payload: { ...this.room.welcomeFor(target), media } });
+      this.audit(actor, "admit", target);
+    });
   }
 
   private deny(actor: string, target: string): void {
@@ -708,18 +786,24 @@ export class RoomController {
     this.audit(actor, "mute", target);
   }
 
-  private async remove(actor: string, target: string): Promise<void> {
-    this.requireHost(actor);
-    const wasInRoster = this.room.inRoster(target);
-    this.applyOrThrow({ type: "remove", actor, participant_id: target });
-    this.cancelGrace(target);
-    const link = this.links.get(target);
-    if (link) {
-      this.links.delete(target);
-      link.close(wasInRoster ? CloseCode.REMOVED : CloseCode.LOBBY_DENIED, "removed by host");
-    }
-    if (wasInRoster) await this.closeTransports(target);
-    this.audit(actor, "remove", target);
+  /** Under the target's lock, so it cannot interleave with the target's own hello or grace expiry. */
+  private remove(actor: string, target: string): Promise<void> {
+    return this.withLock(target, async () => {
+      this.requireHost(actor);
+      const wasInRoster = this.room.inRoster(target);
+      this.applyOrThrow({ type: "remove", actor, participant_id: target });
+      this.cancelGrace(target);
+      const link = this.links.get(target);
+      if (link) {
+        this.links.delete(target);
+        link.close(wasInRoster ? CloseCode.REMOVED : CloseCode.LOBBY_DENIED, "removed by host");
+      }
+      if (wasInRoster) {
+        await this.closeTransports(target);
+        this.bindings.clearCapabilities(target);
+      }
+      this.audit(actor, "remove", target);
+    });
   }
 
   // ---- presence ----
@@ -741,12 +825,13 @@ export class RoomController {
   }
 
   private startGrace(pid: string): void {
+    if (this.gone) return;
     this.cancelGrace(pid);
     this.graceTimers.set(
       pid,
       setTimeout(() => {
         this.graceTimers.delete(pid);
-        void this.expireGrace(pid);
+        this.expireGrace(pid).catch((e: unknown) => this.warn("grace expiry failed", e));
       }, this.deps.timings.graceMs),
     );
   }
@@ -764,6 +849,7 @@ export class RoomController {
       const outcome = this.room.apply({ type: "leave", participant_id: pid });
       if (outcome.ok) this.afterApply(outcome.events);
       await this.closeTransports(pid);
+      this.bindings.clearCapabilities(pid);
     });
   }
 
@@ -773,7 +859,7 @@ export class RoomController {
       if (this.idleTimer) return;
       this.idleTimer = setTimeout(() => {
         this.idleTimer = null;
-        void this.endRoom("idle");
+        this.endRoom("idle").catch((e: unknown) => this.warn("idle end failed", e));
       }, this.deps.timings.idleMs);
     } else if (this.idleTimer) {
       clearTimeout(this.idleTimer);
@@ -992,7 +1078,8 @@ export class RoomController {
     try {
       if (!(await this.deps.lease.refresh())) {
         this.deps.log.error({ sessionId: this.sessionId }, "owner lease lost, closing controller");
-        await this.close(1012, "controller lost ownership");
+        // Whoever holds the lease now owns the checkpoint too: a final flush would clobber it.
+        await this.close(1012, "controller lost ownership", { flush: false });
         return;
       }
       await this.deps.checkpoint.refreshTtl();
@@ -1040,8 +1127,15 @@ export class RoomController {
     this.deps.onGone(sessionId);
   }
 
-  /** Graceful stop without ending the room: flush the checkpoint, release the lease, drop sockets. */
-  async close(code = 1012, reason = "controller restarting"): Promise<void> {
+  /**
+   * Graceful stop without ending the room: flush the checkpoint, release the lease, drop sockets.
+   * flush: false skips the final write (the lease is already someone else's).
+   */
+  async close(
+    code = 1012,
+    reason = "controller restarting",
+    opts: { flush?: boolean } = {},
+  ): Promise<void> {
     if (this.ending) return this.ending;
     if (this.gone) return;
     this.gone = true;
@@ -1049,7 +1143,12 @@ export class RoomController {
     for (const link of this.links.values()) link.close(code, reason);
     this.links.clear();
     this.stats.stop();
-    await this.deps.checkpoint.stop().catch((e: unknown) => this.warn("checkpoint stop failed", e));
+    if (opts.flush === false) this.deps.checkpoint.abandon();
+    else {
+      await this.deps.checkpoint
+        .stop()
+        .catch((e: unknown) => this.warn("checkpoint stop failed", e));
+    }
     await this.deps.lease.release().catch((e: unknown) => this.warn("lease release failed", e));
     this.deps.onGone(this.sessionId);
   }

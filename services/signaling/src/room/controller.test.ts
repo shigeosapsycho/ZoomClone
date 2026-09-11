@@ -190,6 +190,21 @@ describe("RoomController: joining", () => {
     ).toBeNull();
     expect(again.closedWith?.code).toBe(CloseCode.REMOVED);
   });
+
+  it("after close, a hello is refused with 1012 (restarting), not 4004 (ended)", async () => {
+    const t = await startRoom();
+    await t.controller.close();
+    const link = new FakeLink();
+    expect(
+      await t.controller.attach(
+        link,
+        mintClaims({ session_id: t.room.sessionId, participant_id: A }),
+        { id: "h" },
+      ),
+    ).toBeNull();
+    expect(link.closedWith).toEqual({ code: 1012, reason: "controller restarting" });
+    expect(link.sent).toEqual([]);
+  });
 });
 
 describe("RoomController: lobby", () => {
@@ -241,6 +256,64 @@ describe("RoomController: lobby", () => {
     expect(host.ofType("lobby.left")).toHaveLength(2);
     expect(t.room.inLobby(A)).toBe(false);
     expect(t.room.departed(A)).toBeUndefined();
+  });
+
+  it("a double admit yields one join and one NOT_FOUND, and the waiter keeps working transports", async () => {
+    const t = await startRoom();
+    const host = await join(t, { participant_id: HOST, role: "host" });
+    const waiter = await join(t, { participant_id: W, lobby: true });
+    await Promise.all([
+      t.controller.handle(host, HOST, msg("host.admit", { participant_id: W }, "admit-1")),
+      t.controller.handle(host, HOST, msg("host.admit", { participant_id: W }, "admit-2")),
+    ]);
+    const replies = host.sent.filter(
+      (m) => (m.type === "ack" || m.type === "error") && (m.id === "admit-1" || m.id === "admit-2"),
+    );
+    expect(replies.map((m) => m.type).sort()).toEqual(["ack", "error"]);
+    expect(host.ofType("error")[0]?.payload.code).toBe("NOT_FOUND");
+    expect(waiter.ofType("resync")).toHaveLength(1);
+    expect(t.room.inRoster(W)).toBe(true);
+    // The loser queued behind the winner on the waiter's lock and never reached the SFU.
+    expect(sfu.callsTo("createTransport")).toHaveLength(4);
+    expect(sfu.callsTo("closeTransport")).toHaveLength(0);
+    const connect = await request(t, waiter, W, "connect_transport", {
+      transport: "send",
+      dtls_parameters: {},
+    });
+    expect(connect.type).toBe("ack");
+    expect(sfu.callsTo("connectTransport")[0]?.request["transportId"]).toBe("t3");
+  });
+
+  it("an admit whose waiter is denied mid-flight fails NOT_FOUND and closes only the transports it created", async () => {
+    const t = await startRoom();
+    const host = await join(t, { participant_id: HOST, role: "host" });
+    const waiter = await join(t, { participant_id: W, lobby: true });
+    const admit = t.controller.handle(
+      host,
+      HOST,
+      msg("host.admit", { participant_id: W }, "admit-1"),
+    );
+    // Only microtasks pass here, so the admit is parked on its CreateTransport calls when the deny lands.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await t.controller.handle(host, HOST, msg("host.deny", { participant_id: W }, "deny-1"));
+    await admit;
+    expect(host.sent.find((m) => m.type === "ack" && m.id === "deny-1")).toBeDefined();
+    expect(host.sent.find((m) => m.type === "error" && m.id === "admit-1")?.payload).toMatchObject({
+      code: "NOT_FOUND",
+    });
+    expect(waiter.closedWith?.code).toBe(CloseCode.LOBBY_DENIED);
+    expect(t.room.inRoster(W)).toBe(false);
+    expect(sfu.callsTo("createTransport").map((c) => c.request["participantId"])).toEqual([
+      HOST,
+      HOST,
+      W,
+      W,
+    ]);
+    expect(sfu.callsTo("closeTransport").map((c) => c.request["transportId"])).toEqual([
+      "t3",
+      "t4",
+    ]);
+    expect(sfu.room(t.room.sessionId)?.transports.size).toBe(2);
   });
 });
 
@@ -390,6 +463,135 @@ describe("RoomController: media", () => {
     expect(removed.payload).toEqual({ track_id: "trk1" });
     expect(t.room.tracks()).toEqual([]);
   });
+
+  it("subscribe rolls back the consumers it created when a later Subscribe fails", async () => {
+    const t = await startRoom();
+    const ann = await join(t, { participant_id: A });
+    const bob = await join(t, { participant_id: B });
+    await request(t, ann, A, "publish", {
+      kind: "audio",
+      source: "mic",
+      rtp_parameters: {},
+      paused: false,
+    });
+    await request(t, ann, A, "publish", {
+      kind: "video",
+      source: "camera",
+      rtp_parameters: {},
+      paused: false,
+    });
+    sfu.failNext("subscribe", Code.Internal, 1);
+    const failed = await request(t, bob, B, "subscribe", {
+      rtp_capabilities: CAPS,
+      track_ids: ["trk1", "trk2"],
+      prefs: {},
+    });
+    expect(failed).toMatchObject({ type: "error", payload: { code: "SFU_ERROR" } });
+    expect(sfu.callsTo("unsubscribe").map((c) => c.request["consumerId"])).toEqual(["c1"]);
+    expect(sfu.room(t.room.sessionId)?.consumers.size).toBe(0);
+    const retry = await request(t, bob, B, "subscribe", {
+      rtp_capabilities: CAPS,
+      track_ids: ["trk1", "trk2"],
+      prefs: {},
+    });
+    expect(retry).toMatchObject({
+      type: "ack",
+      payload: {
+        consumers: [
+          { track_id: "trk1", consumer_id: "c2" },
+          { track_id: "trk2", consumer_id: "c3" },
+        ],
+        removed: [],
+      },
+    });
+  });
+
+  it("consumer_ready marks the consumer ready only once the SFU unpaused it, so a retry works", async () => {
+    const t = await startRoom();
+    const S = t.room.sessionId;
+    const ann = await join(t, { participant_id: A });
+    const bob = await join(t, { participant_id: B });
+    await request(t, ann, A, "publish", {
+      kind: "video",
+      source: "camera",
+      rtp_parameters: {},
+      paused: false,
+    });
+    await request(t, bob, B, "subscribe", {
+      rtp_capabilities: CAPS,
+      track_ids: ["trk1"],
+      prefs: {},
+    });
+    sfu.failNext("setConsumerPaused", Code.Internal);
+    const failed = await request(t, bob, B, "consumer_ready", { track_id: "trk1" });
+    expect(failed).toMatchObject({ type: "error", payload: { code: "SFU_ERROR" } });
+    expect(sfu.room(S)?.consumers.get("c1")?.paused).toBe(true);
+    const retry = await request(t, bob, B, "consumer_ready", { track_id: "trk1" });
+    expect(retry.type).toBe("ack");
+    expect(sfu.callsTo("setConsumerPaused").map((c) => c.request)).toMatchObject([
+      { consumerId: "c1", paused: false },
+      { consumerId: "c1", paused: false },
+    ]);
+    expect(sfu.room(S)?.consumers.get("c1")?.paused).toBe(false);
+  });
+
+  it("a stats reopen keeps a consumer that is not ready yet, so consumer_ready still unpauses it", async () => {
+    const t = await startRoom();
+    const S = t.room.sessionId;
+    const ann = await join(t, { participant_id: A });
+    const bob = await join(t, { participant_id: B });
+    await request(t, ann, A, "publish", {
+      kind: "video",
+      source: "camera",
+      rtp_parameters: {},
+      paused: false,
+    });
+    await request(t, bob, B, "subscribe", {
+      rtp_capabilities: CAPS,
+      track_ids: ["trk1"],
+      prefs: {},
+    });
+    // A producer that appeared while the stream was down makes the reconcile observable (track.added).
+    sfu.seedRoom(S, {
+      producers: [{ participantId: A, trackId: "extra", kind: "audio", source: "mic" }],
+    });
+    sfu.dropStreams(S);
+    await bob.waitFor("track.added", (m) => m.payload.track.track_id === "extra");
+    // The snapshot reports c1 paused (nobody unpaused it yet); that must not become the client's preference.
+    await request(t, bob, B, "consumer_ready", { track_id: "trk1" });
+    expect(sfu.callsTo("setConsumerPaused").map((c) => c.request)).toMatchObject([
+      { consumerId: "c1", paused: false },
+    ]);
+    expect(sfu.room(S)?.consumers.get("c1")?.paused).toBe(false);
+  });
+
+  it("publish re-checks the mute state after the SFU call and pauses a producer muted mid-flight", async () => {
+    const t = await startRoom();
+    const ann = await join(t, { participant_id: A });
+    const bob = await join(t, { participant_id: B });
+    const publish = t.controller.handle(
+      ann,
+      A,
+      msg("publish", { kind: "audio", source: "mic", rtp_parameters: {}, paused: false }, "pub-1"),
+    );
+    // Only microtasks pass here, so Publish is still in flight at the SFU when the mute lands.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await request(t, ann, A, "set_media_state", { muted: true });
+    await publish;
+    expect(ann.sent.find((m) => m.type === "ack" && m.id === "pub-1")?.payload).toEqual({
+      track_id: "trk1",
+    });
+    expect(sfu.callsTo("publish")[0]?.request["paused"]).toBe(false);
+    expect(sfu.callsTo("setProducerPaused").map((c) => c.request)).toMatchObject([
+      { producerId: "p1", paused: true },
+    ]);
+    expect(sfu.room(t.room.sessionId)?.producers.get("p1")?.paused).toBe(true);
+    expect(t.room.track("trk1")?.paused).toBe(true);
+    expect(bob.ofType("track.added")[0]?.payload.track).toMatchObject({
+      track_id: "trk1",
+      paused: true,
+    });
+  });
 });
 
 describe("RoomController: presence and reconnects", () => {
@@ -471,6 +673,52 @@ describe("RoomController: presence and reconnects", () => {
     expect(bob.ofType("participant.updated")).toEqual([]);
     expect(t.room.rosterEntry(A)?.connected).toBe(true);
   });
+
+  it("a resume that has to rebuild transports keeps the client's rtp capabilities", async () => {
+    const t = await startRoom();
+    const S = t.room.sessionId;
+    const ann = await join(t, { participant_id: A });
+    const bob = await join(t, { participant_id: B });
+    await request(t, ann, A, "publish", {
+      kind: "video",
+      source: "camera",
+      rtp_parameters: {},
+      paused: false,
+    });
+    await request(t, bob, B, "subscribe", {
+      rtp_capabilities: CAPS,
+      track_ids: ["trk1"],
+      prefs: {},
+    });
+    // The SFU drops B's recv transport; the layers event behind it proves both events were processed.
+    sfu.emit(S, {
+      case: "transportClosed",
+      value: { transportId: "t4", participantId: B, reason: "dtls" },
+    });
+    sfu.emit(S, {
+      case: "consumerLayers",
+      value: { consumerId: "c1", active: true, spatialLayer: 0, temporalLayer: 0 },
+    });
+    await bob.waitFor("track.updated");
+    t.controller.detach(bob, B);
+    const back = new FakeLink();
+    expect(
+      await t.controller.attach(back, mintClaims({ session_id: S, participant_id: B }), {
+        id: "re",
+      }),
+    ).toBe(B);
+    expect(back.ofType("resync")[0]?.payload.media).toMatchObject({
+      send_transport: { id: "t5" },
+      recv_transport: { id: "t6" },
+    });
+    expect(sfu.callsTo("closeTransport").map((c) => c.request["transportId"])).toEqual(["t3"]);
+    const again = await request(t, back, B, "subscribe", { track_ids: ["trk1"], prefs: {} });
+    expect(again).toMatchObject({
+      type: "ack",
+      payload: { consumers: [{ track_id: "trk1", consumer_id: "c2" }], removed: [] },
+    });
+    expect(sfu.callsTo("subscribe").at(-1)?.request["transportId"]).toBe("t6");
+  });
 });
 
 describe("RoomController: ending", () => {
@@ -545,6 +793,27 @@ describe("RoomController: ending", () => {
     );
     await again.controller.endRoom("api_end");
     expect(await infra.redis.hget(roomKeys(sessionId).meta, "end_reason")).toBe("api_end");
+  });
+
+  it("a lost lease closes the controller without touching the checkpoint", async () => {
+    const t = await startRoom();
+    const S = t.room.sessionId;
+    const ann = await join(t, { participant_id: A });
+    await sleep(60);
+    expect(await infra.redis.hget(roomKeys(S).meta, "epoch")).toBe("1");
+    // Another controller took the room over: the lease is gone and its checkpoint is ahead (epoch
+    // 99, seq 500). Dirty sections stand in for the write-behind window the old owner still had.
+    await infra.redis.del(roomKeys(S).owner);
+    await infra.redis.hset(roomKeys(S).meta, "epoch", "99");
+    await infra.redis.set(roomKeys(S).seq, "500");
+    t.room.markAllDirty();
+    expect(await t.gone).toBe(S);
+    expect(t.controller.isGone).toBe(true);
+    expect(ann.closedWith).toEqual({ code: 1012, reason: "controller lost ownership" });
+    expect(await infra.redis.hget(roomKeys(S).meta, "epoch")).toBe("99");
+    expect(await infra.redis.get(roomKeys(S).seq)).toBe("500");
+    expect(await infra.redis.hget(roomKeys(S).meta, "status")).toBe("live");
+    expect(await infra.redis.exists(roomKeys(S).owner)).toBe(0);
   });
 });
 

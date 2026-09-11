@@ -126,8 +126,19 @@ export class MediaBindings {
     return this.caps.get(participantId);
   }
 
-  /** Rebuild from the SFU's view. Client capabilities survive (they never leave the controller). */
+  /** For departed participants only: a reconnecting one keeps what it sent. */
+  clearCapabilities(participantId: string): void {
+    this.caps.delete(participantId);
+  }
+
+  /**
+   * Rebuild from the SFU's view. Client capabilities survive (they never leave the controller),
+   * and so does the client-side state of a consumer the SFU still reports (ready, pause
+   * preference, layer prefs): the snapshot only knows the SFU's paused flag, which for a consumer
+   * awaiting consumer_ready would otherwise read as the client's preference.
+   */
   replaceFromSnapshot(snapshot: Snapshot): void {
+    const known = new Map(this.consumersById);
     this.transports.clear();
     this.transportOwners.clear();
     this.producersByTrack.clear();
@@ -159,6 +170,14 @@ export class MediaBindings {
     for (const c of snapshot.consumers) {
       const trackId = this.tracksByProducer.get(c.producerId);
       if (trackId === undefined) continue;
+      const existing = known.get(c.consumerId);
+      if (existing) {
+        existing.track_id = trackId;
+        existing.participant_id = c.participantId;
+        existing.producer_id = c.producerId;
+        this.addConsumer(existing);
+        continue;
+      }
       this.addConsumer({
         consumer_id: c.consumerId,
         track_id: trackId,
