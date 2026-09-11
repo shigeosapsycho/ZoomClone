@@ -42,6 +42,8 @@ export class MediaSession {
   private local: LocalTracks = { audio: null, video: null };
   private state = { muted: false, videoOff: false };
   private published = false;
+  /** applyMedia, publishLocal and subscribe never interleave: a rebuild mid-publish would close the transport under it. */
+  private chain: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly signaling: SignalingClient,
@@ -49,7 +51,14 @@ export class MediaSession {
   ) {}
 
   /** Creates the transports on the first snapshot; on a resync keeps them unless the ids changed. */
-  async applyMedia(
+  applyMedia(
+    media: MediaParams,
+    iceServers: RTCIceServer[],
+  ): Promise<"created" | "kept" | "rebuilt"> {
+    return this.serialize(() => this.doApplyMedia(media, iceServers));
+  }
+
+  private async doApplyMedia(
     media: MediaParams,
     iceServers: RTCIceServer[],
   ): Promise<"created" | "kept" | "rebuilt"> {
@@ -82,8 +91,8 @@ export class MediaSession {
     this.transportIds = ids;
     if (rebuilt) {
       this.events.log?.("transports rebuilt, republishing and resubscribing");
-      if (this.published) await this.publishLocal(this.state);
-      await this.subscribe(this.desired, this.prefs);
+      if (this.published) await this.doPublishLocal(this.state);
+      await this.doSubscribe(this.desired, this.prefs);
       return "rebuilt";
     }
     return "created";
@@ -106,7 +115,11 @@ export class MediaSession {
   }
 
   /** Produces mic and camera; paused flags travel with the publish so a muted join stays muted. */
-  async publishLocal(state: { muted: boolean; videoOff: boolean }): Promise<void> {
+  publishLocal(state: { muted: boolean; videoOff: boolean }): Promise<void> {
+    return this.serialize(() => this.doPublishLocal(state));
+  }
+
+  private async doPublishLocal(state: { muted: boolean; videoOff: boolean }): Promise<void> {
     const send = this.requireTransport(this.send, "send");
     this.state = { ...state };
     this.published = true;
@@ -158,7 +171,14 @@ export class MediaSession {
   }
 
   /** Declarative: the full set of remote tracks to receive, with optional per-track prefs. */
-  async subscribe(trackIds: string[], prefs: Record<string, SubscriptionPref> = {}): Promise<void> {
+  subscribe(trackIds: string[], prefs: Record<string, SubscriptionPref> = {}): Promise<void> {
+    return this.serialize(() => this.doSubscribe(trackIds, prefs));
+  }
+
+  private async doSubscribe(
+    trackIds: string[],
+    prefs: Record<string, SubscriptionPref> = {},
+  ): Promise<void> {
     this.desired = [...trackIds];
     this.prefs = { ...prefs };
     const recv = this.recv;
@@ -189,7 +209,10 @@ export class MediaSession {
       try {
         await this.signaling.request("consumer_ready", { track_id: params.track_id });
       } catch (error) {
-        if (!(error instanceof RequestError && error.code === "NOT_FOUND")) throw error;
+        if (error instanceof RequestError && error.code === "NOT_FOUND") continue;
+        // Left in place it would stay paused for good; dropping it makes the next subscribe recreate it.
+        this.dropConsumer(params.track_id);
+        throw error;
       }
     }
     // Tracks the server no longer knows (removed while we were away) get no consumer; drop stale ones.
@@ -285,6 +308,12 @@ export class MediaSession {
     this.consumers.delete(trackId);
     consumer.close();
     this.events.onFeedRemoved(trackId);
+  }
+
+  private serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.chain.then(fn, fn);
+    this.chain = run.catch(() => undefined);
+    return run;
   }
 
   private teardownTransports(): void {
