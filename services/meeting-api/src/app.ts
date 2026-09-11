@@ -1,3 +1,4 @@
+import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance } from "fastify";
 import {
   serializerCompiler,
@@ -34,6 +35,12 @@ export async function buildApp(deps: AppDeps): Promise<App> {
   app.setErrorHandler(errorHandler);
   app.setNotFoundHandler(notFoundHandler);
   app.decorate("deps", deps);
+
+  await app.register(cors, {
+    origin: deps.env.CORS_ORIGINS,
+    methods: ["GET", "POST", "PATCH", "DELETE"],
+    allowedHeaders: ["authorization", "content-type"],
+  });
 
   registerAuthHook(app, deps.userVerifier);
   await app.register(authRoutes);

@@ -50,6 +50,15 @@ export const EnvSchema = z
     // stop a flood against one meeting, so it is much higher.
     JOIN_RATE_LIMIT_PER_CODE: z.coerce.number().int().default(120),
     JOIN_RATE_WINDOW_MS: z.coerce.number().int().default(60_000),
+    CORS_ORIGINS: z
+      .string()
+      .default("http://localhost:8081")
+      .transform((s) =>
+        s
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean),
+      ),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === "production") {

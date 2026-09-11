@@ -32,6 +32,23 @@ describe("app skeleton", () => {
     expect(res.body).toContain("join_errors_total");
   });
 
+  it("answers a CORS preflight for allowed origins and omits the header for others", async () => {
+    const allowed = await ctx.app.inject({
+      method: "OPTIONS",
+      url: "/v1/join",
+      headers: { origin: "http://localhost:8081", "access-control-request-method": "POST" },
+    });
+    expect(allowed.statusCode).toBe(204);
+    expect(allowed.headers["access-control-allow-origin"]).toBe("http://localhost:8081");
+
+    const blocked = await ctx.app.inject({
+      method: "OPTIONS",
+      url: "/v1/join",
+      headers: { origin: "http://evil.example.com", "access-control-request-method": "POST" },
+    });
+    expect(blocked.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
   it("renders ApiError with status, code and retry-after, and hides internal errors", async () => {
     const app = await buildApp(ctx.deps);
     app.get("/boom", async () => {
