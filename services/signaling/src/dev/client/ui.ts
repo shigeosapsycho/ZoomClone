@@ -212,14 +212,13 @@ export function createUi(root: HTMLElement, actions: UiActions): Ui {
   const chatLines = el("div", "lines");
   chatLines.dataset["testid"] = "chat-lines";
   const chatForm = el("form");
-  const chatInput = el("input");
-  chatInput.placeholder = "Type a message";
-  chatInput.setAttribute("aria-label", "Message");
-  chatInput.autocomplete = "off";
+  // A visible label, like the join fields: a placeholder alone is not a name.
+  const chat = labelled("message", "chat", "Type a message");
+  const chatInput = chat.input;
   chatInput.dataset["testid"] = "chat-input";
   const chatSend = rocker("send", () => undefined, { small: true, testId: "chat-send" });
   chatSend.type = "submit";
-  chatForm.append(chatInput, chatSend);
+  chatForm.append(chat.label, chatSend);
   chatForm.addEventListener("submit", (event) => {
     event.preventDefault();
     const body = chatInput.value.trim();
@@ -262,7 +261,7 @@ export function createUi(root: HTMLElement, actions: UiActions): Ui {
   waitBox.append(
     el("h1", "legend", "Green room"),
     el("p", undefined, "The host has been told you are here. This page updates on its own."),
-    rocker("leave", () => actions.leave(), { testId: "leave" }),
+    rocker("leave room", () => actions.leave(), { testId: "leave" }),
   );
 
   const endBox = el("div", "join");
@@ -318,7 +317,15 @@ export function createUi(root: HTMLElement, actions: UiActions): Ui {
     let statusText = "the gallery";
     if (model.screen === "room") {
       lampOn = model.status === "joined" ? "tally" : "amber";
-      statusText = model.status === "joined" ? "on air" : "reconnecting";
+      // "reconnecting" covers the whole way back once we have been on air (the reconnecting
+      // status and the hello that follows it); the first connect reads "connecting".
+      const wasOnAir = model.sinceMs !== null;
+      statusText =
+        model.status === "joined"
+          ? "on air"
+          : model.status === "reconnecting" || wasOnAir
+            ? "reconnecting"
+            : "connecting";
     } else if (model.screen === "waiting") {
       lampOn = "amber";
       statusText = "waiting for the host";
@@ -453,8 +460,9 @@ export function createUi(root: HTMLElement, actions: UiActions): Ui {
     const videoTrack = model.view.tracks.find(
       (t) => t.owner === entry.participant_id && t.kind === "video",
     );
-    if (videoTrack && !isLocal) {
+    if (videoTrack && !isLocal && !videoTrack.paused) {
       // The layer the SFU delivers to this client; prefs travel through the setLayer action.
+      // A paused camera shows its lamp instead of a layer.
       const delivered = model.view.layers[videoTrack.track_id];
       badges.push([`L${delivered ?? videoTrack.layers}`]);
     }

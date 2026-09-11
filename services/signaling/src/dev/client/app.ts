@@ -58,6 +58,7 @@ let joinError: { status: number; code: string } | null = null;
 let onAirSince: number | null = null;
 let prefs: Record<string, SubscriptionPref> = {};
 const meter = new LevelMeter();
+const feedOwners = new Map<string, { owner: string; kind: "audio" | "video" }>();
 const events: RoomEvent[] = [];
 const closes: CloseInfo[] = [];
 const snapshots: Array<{ kind: "welcome" | "resync"; seq: number; epoch: number }> = [];
@@ -67,7 +68,9 @@ const ui = createUi(root, {
   leave: () => {
     signaling?.leave();
     media?.close();
+    meter.close();
     screen = "closed";
+    status = "closed"; // the socket's own close event follows; the harness must not read "joined"
     error = null; // a chosen leave has no reason line; the panel reads "You left the room"
     render();
   },
@@ -108,9 +111,12 @@ const ui = createUi(root, {
 });
 
 function report(err: unknown): void {
-  error = err instanceof Error ? err.message : String(err);
+  const message = err instanceof Error ? err.message : String(err);
   // The panel screens print the error; in a room the tape is the log that carries it.
-  ui.tape(view.seq, `error ${error}`);
+  ui.tape(view.seq, `error ${message}`);
+  // A terminal close sets its sentence first and rejects the pending requests, whose catch
+  // handlers land here as microtasks: they must not overwrite it.
+  if (screen !== "ended" && screen !== "closed") error = message;
   render();
 }
 
@@ -198,10 +204,17 @@ function startSession(joined: JoinResponse): void {
     onFeed: (feed) => {
       ui.attachFeed(feed.trackId, feed.kind, feed.track);
       const owner = view.tracks.find((t) => t.track_id === feed.trackId)?.owner;
-      if (owner && feed.kind === "audio") meter.attach(owner, feed.track);
+      if (!owner) return;
+      feedOwners.set(feed.trackId, { owner, kind: feed.kind });
+      if (feed.kind === "audio") meter.attach(owner, feed.track);
     },
     onFeedRemoved: (trackId) => {
       ui.detachFeed(trackId);
+      // The view may already have dropped the track (track.removed runs first), so the owner
+      // comes from what onFeed recorded; a departed participant stops reporting a level.
+      const feed = feedOwners.get(trackId);
+      feedOwners.delete(trackId);
+      if (feed?.kind === "audio") meter.detach(feed.owner);
     },
     log: (line) => ui.tape(view.seq, line),
   });
@@ -228,6 +241,7 @@ function startSession(joined: JoinResponse): void {
           // The ended panel's heading says what happened; every other close carries its reason.
           error = ended ? null : closeMessage(info.code);
           media?.close();
+          meter.close();
         }
         render();
       },
