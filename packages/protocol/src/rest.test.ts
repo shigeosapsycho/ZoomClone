@@ -106,6 +106,7 @@ describe("SignalingClaimsSchema", () => {
       session_id: "2f6a2b6e-6f0b-4c1e-9a52-0c5d3f1a9b11",
       participant_id: "2f6a2b6e-6f0b-4c1e-9a52-0c5d3f1a9b12",
       role: "host",
+      lobby: false,
       sfu_hint: "sfu-local-1",
       display_name: "Ana",
       lobby_enabled: true,
@@ -113,5 +114,18 @@ describe("SignalingClaimsSchema", () => {
     });
     expect(ok.success).toBe(true);
     expect(SignalingClaimsSchema.safeParse({ role: "admin" }).success).toBe(false);
+  });
+
+  it("rejects claims without the per-participant lobby decision", () => {
+    const withoutLobby = {
+      session_id: "2f6a2b6e-6f0b-4c1e-9a52-0c5d3f1a9b11",
+      participant_id: "2f6a2b6e-6f0b-4c1e-9a52-0c5d3f1a9b12",
+      role: "host" as const,
+      sfu_hint: "sfu-local-1",
+      display_name: "Ana",
+      lobby_enabled: true,
+      max_participants: 500,
+    };
+    expect(SignalingClaimsSchema.safeParse(withoutLobby).success).toBe(false);
   });
 });

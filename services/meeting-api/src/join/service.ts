@@ -69,6 +69,7 @@ export class JoinService {
         session_id: session.id,
         participant_id: participantId,
         role,
+        lobby,
         sfu_hint: session.homeSfuId ?? env.SFU_ID,
         display_name: input.display_name,
         lobby_enabled: meeting.settings.lobby,

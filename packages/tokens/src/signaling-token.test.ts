@@ -7,6 +7,7 @@ const claims = {
   session_id: "2f6a2b6e-6f0b-4c1e-9a52-0c5d3f1a9b11",
   participant_id: "2f6a2b6e-6f0b-4c1e-9a52-0c5d3f1a9b12",
   role: "attendee" as const,
+  lobby: true,
   sfu_hint: "sfu-local-1",
   display_name: "Ana",
   lobby_enabled: true,

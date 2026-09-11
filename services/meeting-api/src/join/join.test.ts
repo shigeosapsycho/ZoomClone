@@ -78,6 +78,7 @@ describe("POST /v1/join", () => {
       session_id: g.session_id,
       participant_id: g.participant_id,
       role: "attendee",
+      lobby: true,
       sfu_hint: ctx.env.SFU_ID,
       display_name: "Ana",
       lobby_enabled: true,
@@ -111,6 +112,13 @@ describe("POST /v1/join", () => {
     expect(h.lobby).toBe(false);
     expect(h.session_id).toBe(guest.session_id);
     expect(h.participant_id).not.toBe(guest.participant_id);
+
+    const claims = await verifySignalingToken(
+      h.signaling_token,
+      ctx.deps.keys.publicKey,
+      ctx.env.TOKEN_ISSUER,
+    );
+    expect(claims.lobby).toBe(false);
   });
 
   it("org members skip the lobby; lobby off skips it for guests", async () => {

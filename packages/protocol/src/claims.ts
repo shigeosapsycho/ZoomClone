@@ -13,6 +13,9 @@ export const SignalingClaimsSchema = z.object({
   session_id: z.uuid(),
   participant_id: z.uuid(),
   role: RoleSchema,
+  // The meeting API's decision for this participant (settings, role and org membership already
+  // applied). lobby_enabled stays as the room-level setting the controller seeds into room meta.
+  lobby: z.boolean(),
   sfu_hint: z.string().min(1),
   display_name: z.string().min(1).max(80),
   lobby_enabled: z.boolean(),
