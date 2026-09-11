@@ -11,9 +11,11 @@ export default function globalSetup(): void {
   execSync("pnpm db:migrate", {
     cwd: ROOT,
     stdio: "inherit",
-    env: { ...process.env, DATABASE_URL: process.env["E2E_DATABASE_URL"] ?? DATABASE_URL },
+    env: { ...process.env, DATABASE_URL },
   });
 }
 
-export const DATABASE_URL = "postgres://zoomclone:zoomclone@localhost:55432/zoomclone";
+/** One database for the migration, the services and the api helper (E2E_DATABASE_URL overrides). */
+export const DATABASE_URL =
+  process.env["E2E_DATABASE_URL"] ?? "postgres://zoomclone:zoomclone@localhost:55432/zoomclone";
 export const REDIS_URL = "redis://localhost:56379/0";

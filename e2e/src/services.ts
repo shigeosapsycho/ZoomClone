@@ -58,6 +58,14 @@ type Running = { name: ServiceName; child: ChildProcess };
 export class ServiceManager {
   private readonly running = new Map<ServiceName, Running>();
 
+  constructor() {
+    // A runner that dies (a killed worker, an uncaught error) never reaches stopAll: give every
+    // child tree a synchronous best-effort kill on the way out. The exit hook cannot await.
+    process.once("exit", () => {
+      for (const { child } of this.running.values()) killTreeSync(child);
+    });
+  }
+
   async startAll(): Promise<void> {
     for (const name of ["meeting-api", "sfu", "signaling"] as const) await this.start(name);
   }
@@ -71,7 +79,25 @@ export class ServiceManager {
       stdio: ["ignore", "inherit", "inherit"],
     });
     this.running.set(name, { name, child });
-    await waitFor(() => this.healthy(name), 30_000, `${name} did not become healthy`);
+    // The health poll races the child's exit: a crash on boot fails at once, not after 30 s.
+    let onExit = (): void => undefined;
+    const exited = new Promise<never>((_, reject) => {
+      onExit = () =>
+        reject(
+          new Error(
+            `${name} exited with code ${child.exitCode ?? child.signalCode} before becoming healthy`,
+          ),
+        );
+      child.once("exit", onExit);
+    });
+    try {
+      await Promise.race([
+        waitFor(() => this.healthy(name), 30_000, `${name} did not become healthy`),
+        exited,
+      ]);
+    } finally {
+      child.off("exit", onExit);
+    }
   }
 
   async stop(name: ServiceName): Promise<void> {
@@ -138,17 +164,41 @@ function h2Healthy(baseUrl: string): Promise<boolean> {
   });
 }
 
+function exited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
 async function killTree(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null) return;
-  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  if (exited(child)) return;
+  const gone = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   if (process.platform === "win32" && child.pid) {
-    execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: "ignore" });
+    // taskkill fails when the pid is already gone (the process died between the check and the
+    // call); the exit event decides either way. A live child it could not kill gets kill().
+    try {
+      execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: "ignore" });
+    } catch {
+      if (!exited(child)) child.kill("SIGKILL");
+    }
   } else {
     child.kill("SIGTERM");
     const escalate = setTimeout(() => child.kill("SIGKILL"), 5_000);
     child.once("exit", () => clearTimeout(escalate));
   }
-  await exited;
+  await gone;
+}
+
+/** For the process exit hook, which cannot wait: the whole tree on Windows, else SIGKILL. */
+function killTreeSync(child: ChildProcess): void {
+  if (exited(child)) return;
+  try {
+    if (process.platform === "win32" && child.pid) {
+      execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: "ignore" });
+    } else {
+      child.kill("SIGKILL");
+    }
+  } catch {
+    // best effort: the child may already be gone
+  }
 }
 
 export async function waitFor(

@@ -88,7 +88,9 @@ export async function openGallery(
   const gallery: Gallery = {
     page,
     // The arrow's source runs in the page against window.__harness; keep the arrows self-contained
-    // (no closures over test variables: pass values through page.evaluate instead).
+    // (no closures over test variables: pass values through page.evaluate instead). The source is
+    // evaluated as written, so it must be valid in the browser as the test transform emits it
+    // (Playwright's transform keeps modern syntax such as `?.` for Node 24).
     harness: <T>(fn: (h: HarnessShape) => T | Promise<T>) =>
       page.evaluate(
         ({ src }) =>

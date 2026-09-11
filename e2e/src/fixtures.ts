@@ -12,14 +12,19 @@ export const test = base.extend<Record<never, never>, { services: Services; api:
     async ({}, use) => {
       await assertPortsFree();
       const manager = new ServiceManager();
-      await manager.startAll();
-      await use({
-        restartSignaling: () => manager.restartSignaling(),
-        urls: { api: API_URL, signaling: SIGNALING_URL },
-      });
-      await manager.stopAll();
+      // A start that fails must not leave the services that did come up on the real ports.
+      try {
+        await manager.startAll();
+        await use({
+          restartSignaling: () => manager.restartSignaling(),
+          urls: { api: API_URL, signaling: SIGNALING_URL },
+        });
+      } finally {
+        await manager.stopAll();
+      }
     },
-    { scope: "worker" },
+    // Its own budget: a slow machine's three starts are not charged to the first test.
+    { scope: "worker", timeout: 90_000 },
   ],
   api: [
     async ({ services }, use) => {
