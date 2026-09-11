@@ -25,6 +25,20 @@ export function testEnv(overrides: Record<string, string> = {}): Env {
   });
 }
 
+export function bearer(token: string): { authorization: string } {
+  return { authorization: `Bearer ${token}` };
+}
+
+export async function mintUser(
+  ctx: TestContext,
+  body: { sub?: string; org_id?: string; name?: string },
+): Promise<{ token: string; sub: string; orgId: string }> {
+  const res = await ctx.app.inject({ method: "POST", url: "/dev/oidc/token", payload: body });
+  if (res.statusCode !== 200) throw new Error(`dev token failed: ${res.body}`);
+  const json = res.json<{ access_token: string; sub: string; org_id: string }>();
+  return { token: json.access_token, sub: json.sub, orgId: json.org_id };
+}
+
 export type TestContext = {
   app: App;
   deps: AppDeps;
