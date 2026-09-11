@@ -15,7 +15,9 @@ import {
   type TestInfra,
   type TestSignaling,
 } from "../../test/helpers";
+import { Checkpoint } from "../room/checkpoint";
 import { ctlChannel } from "../room/registry";
+import { Room } from "../room/room";
 
 const HOST = "11111111-1111-4111-8111-111111111111";
 const A = "22222222-2222-4222-8222-222222222222";
@@ -88,9 +90,17 @@ function rawRequest(httpUrl: string, headers: string[]): Promise<string> {
 
 describe("gateway: handshake", () => {
   it("closes 4006 without a hello in time, or when the first frame is not a hello", async () => {
-    const silent = await connect();
-    const closed = await silent.waitForClose();
-    expect(closed.code).toBe(CloseCode.PROTOCOL_ERROR);
+    // A second server with a short hello timeout; the shared one keeps a second so slow room
+    // builds in other tests never hit it.
+    const quick = await startTestSignaling(infra, sfu.baseUrl, { env: { HELLO_TIMEOUT_MS: 300 } });
+    try {
+      const silent = await TestClient.connect(`${quick.url}/rooms/${sessionId}`);
+      clients.push(silent);
+      const closed = await silent.waitForClose();
+      expect(closed.code).toBe(CloseCode.PROTOCOL_ERROR);
+    } finally {
+      await quick.close();
+    }
     const eager = await connect();
     eager.send({ type: "raise_hand", id: "1", payload: {} });
     expect((await eager.waitForClose()).code).toBe(CloseCode.PROTOCOL_ERROR);
@@ -122,6 +132,26 @@ describe("gateway: handshake", () => {
     const upgrade = ["Connection: Upgrade", "Upgrade: websocket"];
     expect(await rawRequest(signaling.httpUrl, upgrade)).toMatch(/^HTTP\/1\.1 400 /);
     expect((await fetch(`${signaling.httpUrl}/healthz`)).status).toBe(200);
+  });
+
+  it("answers FORBIDDEN and closes 4004 for a session whose room already ended", async () => {
+    const room = Room.create({
+      session_id: sessionId,
+      home_sfu: "fake-sfu",
+      lobby_enabled: true,
+      max_participants: 10,
+    });
+    const checkpoint = new Checkpoint(infra.redis, room, { windowMs: 20 });
+    await checkpoint.writeAll();
+    await checkpoint.markEnded("host_end");
+    const client = await connect();
+    const token = await mintToken(infra, mintClaims({ session_id: sessionId, participant_id: A }));
+    const reply = await client.request("hello", { token });
+    expect(reply).toMatchObject({
+      type: "error",
+      payload: { code: "FORBIDDEN", message: "room ended" },
+    });
+    expect((await client.waitForClose()).code).toBe(CloseCode.ROOM_ENDED);
   });
 
   it("answers CONTROLLER_BUSY and closes 1013 while another controller owns the room", async () => {

@@ -14,7 +14,7 @@ import {
 import type { Env } from "../env";
 import type { HelloPayload, RoomController } from "../room/controller";
 import { ControllerBusyError, RoomEndedError, type RoomRegistry } from "../room/registry";
-import type { TokenVerifier } from "./auth";
+import { TokenUnavailableError, type TokenVerifier } from "./auth";
 import type { ParticipantLink } from "./link";
 import { TokenBucket } from "./rate-limit";
 
@@ -250,7 +250,18 @@ class Connection {
     let claims: SignalingClaims;
     try {
       claims = await this.deps.verifier.verify(message.payload.token);
-    } catch {
+    } catch (error) {
+      if (error instanceof TokenUnavailableError) {
+        // A JWKS outage is not the client's fault: 1013 tells it to retry, 4001 would log it out.
+        this.deps.log.error({ link: this.link.id, error }, "token check unavailable");
+        this.link.send({
+          type: "error",
+          id: message.id,
+          payload: { code: "INTERNAL", message: "token check unavailable, retry" },
+        });
+        this.link.close(1013, "try again later");
+        return;
+      }
       this.link.send({
         type: "error",
         id: message.id,
@@ -284,6 +295,11 @@ class Connection {
         });
         this.link.close(1013, "try again later");
       } else if (error instanceof RoomEndedError) {
+        this.link.send({
+          type: "error",
+          id: message.id,
+          payload: { code: "FORBIDDEN", message: "room ended" },
+        });
         this.link.close(CloseCode.ROOM_ENDED, "room ended");
       } else {
         this.deps.log.error({ sessionId: this.sessionId, error }, "room lookup failed");
@@ -308,6 +324,8 @@ class Connection {
     if (participantId === null) return;
     this.controller = controller;
     this.participantId = participantId;
+    // The room build and the SFU calls behind the hello are not client silence.
+    this.lastPingAt = Date.now();
     // The socket may have closed while attach was in flight; give the controller its detach now.
     if (this.closed) controller.detach(this.link, participantId);
   }

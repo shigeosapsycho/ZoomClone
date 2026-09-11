@@ -146,8 +146,13 @@ export class RoomRegistry {
       }
       return controller;
     } catch (error) {
-      if (controller) await controller.close(1011, "start failed").catch(() => undefined);
-      else await lease.release().catch(() => undefined);
+      // No final flush: a fresh room that never served anyone must not land in Redis, and a
+      // rehydrated one is still whatever the checkpoint held.
+      if (controller) {
+        await controller.close(1011, "start failed", { flush: false }).catch(() => undefined);
+      } else {
+        await lease.release().catch(() => undefined);
+      }
       throw error;
     }
   }

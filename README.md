@@ -85,6 +85,9 @@ pnpm --filter @zoomclone/signaling start   # or: pnpm dev (all services)
 curl -s localhost:8081/healthz              # {"ok":true,"rooms":0}
 ```
 
+`/metrics` (Prometheus) is served unauthenticated on the same public port as the WebSocket
+endpoint; keep it behind the ingress (or scrape it over the private network only).
+
 Room state is checkpointed to Redis (`{room:<session_id>}:*`) within 50 ms of every change and an
 owner lease keeps one controller per room. Kill and restart the process: clients reconnect, the
 room rehydrates from Redis plus the SFU snapshot with a new `epoch`, and they receive a `resync`.

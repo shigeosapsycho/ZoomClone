@@ -61,9 +61,9 @@ export class MediaBindings {
     const entry = this.transports.get(participantId);
     for (const t of [entry?.send, entry?.recv]) if (t) this.transportOwners.delete(t.id);
     this.transports.delete(participantId);
-    for (const [trackId, p] of this.producersByTrack) {
+    // removeProducer deletes from producersByTrack, so iterate a copy.
+    for (const p of [...this.producersByTrack.values()]) {
       if (p.owner === participantId) this.removeProducer(p.producer_id);
-      void trackId;
     }
     for (const [id, c] of this.consumersById)
       if (c.participant_id === participantId) this.consumersById.delete(id);

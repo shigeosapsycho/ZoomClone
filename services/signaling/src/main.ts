@@ -33,6 +33,7 @@ const registry = new RoomRegistry({
     heartbeatMs: env.HEARTBEAT_MS,
     speakerTickMs: 300,
     statsRetryMs: 1000,
+    sfuTimeoutMs: 10_000,
     checkpointWindowMs: env.CHECKPOINT_WINDOW_MS,
     leaseMs: env.OWNER_LEASE_MS,
   },
@@ -79,6 +80,11 @@ async function shutdown(signal: string): Promise<void> {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
+server.on("error", (error) => {
+  // EADDRINUSE and friends: without a listener this is an uncaught exception with no context.
+  log.fatal({ error, port: env.SIGNALING_PORT }, "listen failed");
+  process.exit(1);
+});
 server.listen(env.SIGNALING_PORT, "0.0.0.0", () => {
   log.info(
     {

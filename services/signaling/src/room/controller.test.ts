@@ -191,6 +191,9 @@ describe("RoomController: joining", () => {
       ),
     ).toBeNull();
     expect(again.closedWith?.code).toBe(CloseCode.REMOVED);
+    expect(again.sent).toEqual([
+      { type: "error", id: "h", payload: { code: "FORBIDDEN", message: "departed: removed" } },
+    ]);
   });
 
   it("after close, a hello is refused with 1012 (restarting), not 4004 (ended)", async () => {
@@ -507,6 +510,49 @@ describe("RoomController: media", () => {
     expect((await request(t, bob, B, "restart_ice", { transport: "send" })).payload).toMatchObject({
       code: "NOT_IMPLEMENTED",
     });
+  });
+
+  it("host.mute pauses the target's mic and audits; a host muting themselves is a plain media state change", async () => {
+    const t = await startRoom();
+    const audits: unknown[] = [];
+    infra.bus.subscribe("host.action", (e) => {
+      audits.push(e.payload);
+    });
+    const host = await join(t, { participant_id: HOST, role: "host" });
+    const ann = await join(t, { participant_id: A });
+    await request(t, ann, A, "publish", {
+      kind: "audio",
+      source: "mic",
+      rtp_parameters: {},
+      paused: false,
+    });
+    expect(await request(t, ann, A, "host.mute", { participant_id: HOST })).toMatchObject({
+      type: "error",
+      payload: { code: "FORBIDDEN" },
+    });
+    expect((await request(t, host, HOST, "host.mute", { participant_id: A })).type).toBe("ack");
+    expect(sfu.callsTo("setProducerPaused").map((c) => c.request)).toMatchObject([
+      { producerId: "p1", paused: true },
+    ]);
+    expect(t.room.rosterEntry(A)?.muted).toBe(true);
+    expect(ann.ofType("participant.updated").at(-1)?.payload).toEqual({
+      participant_id: A,
+      patch: { muted: true },
+    });
+    expect((await request(t, host, HOST, "host.mute", { participant_id: HOST })).type).toBe("ack");
+    expect(t.room.rosterEntry(HOST)?.muted).toBe(true);
+    await infra.bus.drain();
+    expect(audits).toEqual([
+      { session_id: t.room.sessionId, actor_id: HOST, action: "mute", target_id: A },
+    ]);
+  });
+
+  it("a chat to yourself arrives once", async () => {
+    const t = await startRoom();
+    const ann = await join(t, { participant_id: A });
+    expect((await request(t, ann, A, "chat", { body: "note to self", to: A })).type).toBe("ack");
+    expect(ann.ofType("chat")).toHaveLength(1);
+    expect(ann.ofType("chat")[0]?.payload).toMatchObject({ from: A, to: A, body: "note to self" });
   });
 
   it("stats events: layers reach only the subscriber, speakers become active_speakers, producer_closed drops the track", async () => {
@@ -917,8 +963,15 @@ describe("RoomController: ending", () => {
     const { meetingId, sessionId } = await seedSession(infra.db);
     const t = await startRoom(sessionId);
     const ended: unknown[] = [];
+    const busOrder: string[] = [];
     infra.bus.subscribe("session.ended", (e) => {
       ended.push(e.payload);
+      busOrder.push(e.type);
+    });
+    const left: Array<{ participant_id: string; reason: string; left_at: string }> = [];
+    infra.bus.subscribe("participant.left", (e) => {
+      left.push(e.payload);
+      busOrder.push(e.type);
     });
     const host = await join(t, { participant_id: HOST, role: "host" });
     const ann = await join(t, { participant_id: A });
@@ -952,7 +1005,25 @@ describe("RoomController: ending", () => {
       reason: "host_end",
       peak_participants: 2,
     });
+    // Roster members get a participant.left (reason ended) before session.ended, so their
+    // attendance rows receive left_at; the waiter never joined and gets none.
+    expect(left.map((p) => p.participant_id).sort()).toEqual([HOST, A].sort());
+    for (const p of left) {
+      expect(p.reason).toBe("ended");
+      expect(Date.parse(p.left_at)).not.toBeNaN();
+    }
+    expect(busOrder).toEqual(["participant.left", "participant.left", "session.ended"]);
     expect(await infra.redis.exists(roomKeys(sessionId).owner)).toBe(0);
+    const late = new FakeLink();
+    expect(
+      await t.controller.attach(late, mintClaims({ session_id: sessionId, participant_id: B }), {
+        id: "late",
+      }),
+    ).toBeNull();
+    expect(late.sent).toEqual([
+      { type: "error", id: "late", payload: { code: "FORBIDDEN", message: "room ended" } },
+    ]);
+    expect(late.closedWith?.code).toBe(CloseCode.ROOM_ENDED);
   });
 
   it("an idle room ends with reason idle and the meeting returns to scheduled; endRoom runs once", async () => {

@@ -62,6 +62,8 @@ export type ControllerTimings = {
   heartbeatMs: number;
   speakerTickMs: number;
   statsRetryMs: number;
+  /** Deadline for every unary SFU call (the Stats stream has none). */
+  sfuTimeoutMs: number;
 };
 
 export type ControllerMetrics = { resync(): void; replay(): void };
@@ -156,6 +158,11 @@ export class RoomController {
     return this.gone;
   }
 
+  /** Call options for unary SFU calls: a hung SFU must not hold a lock or a hello forever. */
+  private get callOptions(): { timeoutMs: number } {
+    return { timeoutMs: this.deps.timings.sfuTimeoutMs };
+  }
+
   /** AllocateRoom, first Stats snapshot (reconciled), initial checkpoint, timers. */
   async start(): Promise<void> {
     try {
@@ -201,8 +208,13 @@ export class RoomController {
     hello: HelloPayload,
   ): Promise<string | null> {
     const pid = claims.participant_id;
+    // Every refusal is an error frame followed by the close, so clients key on one thing.
     if (this.room.status === "ended") {
-      link.close(CloseCode.ROOM_ENDED, "room ended");
+      this.reject(link, hello.id, {
+        code: "FORBIDDEN",
+        message: "room ended",
+        close: CloseCode.ROOM_ENDED,
+      });
       return null;
     }
     if (this.gone) {
@@ -211,7 +223,11 @@ export class RoomController {
     }
     const departed = this.room.departed(pid);
     if (departed) {
-      link.close(CLOSE_BY_DEPARTED[departed], `departed: ${departed}`);
+      this.reject(link, hello.id, {
+        code: "FORBIDDEN",
+        message: `departed: ${departed}`,
+        close: CLOSE_BY_DEPARTED[departed],
+      });
       return null;
     }
     this.cancelGrace(pid);
@@ -404,10 +420,13 @@ export class RoomController {
       case "connect_transport": {
         const transport = this.bindings.transport(pid, message.payload.transport);
         if (!transport) throw new RoomFailure({ code: "NOT_FOUND", message: "no such transport" });
-        await this.deps.sfu.connectTransport({
-          transportId: transport.id,
-          dtlsParametersJson: JSON.stringify(message.payload.dtls_parameters),
-        });
+        await this.deps.sfu.connectTransport(
+          {
+            transportId: transport.id,
+            dtlsParametersJson: JSON.stringify(message.payload.dtls_parameters),
+          },
+          this.callOptions,
+        );
         return { ack: {} };
       }
       case "publish":
@@ -489,11 +508,14 @@ export class RoomController {
   // ---- media ----
 
   private async createTransport(pid: string, direction: "send" | "recv"): Promise<TransportParams> {
-    const res = await this.deps.sfu.createTransport({
-      sessionId: this.sessionId,
-      participantId: pid,
-      direction: direction === "send" ? TransportDirection.SEND : TransportDirection.RECV,
-    });
+    const res = await this.deps.sfu.createTransport(
+      {
+        sessionId: this.sessionId,
+        participantId: pid,
+        direction: direction === "send" ? TransportDirection.SEND : TransportDirection.RECV,
+      },
+      this.callOptions,
+    );
     try {
       return {
         id: res.transportId,
@@ -510,9 +532,11 @@ export class RoomController {
 
   /** Cleanup call that tolerates NOT_FOUND (the SFU already dropped it) and logs anything else. */
   private async closeTransportQuietly(transportId: string): Promise<void> {
-    await this.deps.sfu.closeTransport({ transportId }).catch((error: unknown) => {
-      if (!isNotFound(error)) this.warn("closeTransport failed", error);
-    });
+    await this.deps.sfu
+      .closeTransport({ transportId }, this.callOptions)
+      .catch((error: unknown) => {
+        if (!isNotFound(error)) this.warn("closeTransport failed", error);
+      });
   }
 
   /** Both transports or none (design doc ordering rule): a failed second call closes the first. */
@@ -580,15 +604,18 @@ export class RoomController {
     for (const old of this.room.tracksOf(pid, payload.source))
       await this.unpublish(pid, old.track_id);
     const sentPaused = this.effectivePaused(payload, entry);
-    const res = await this.deps.sfu.publish({
-      sessionId: this.sessionId,
-      participantId: pid,
-      transportId: send.id,
-      kind: kindToPb(payload.kind),
-      source: sourceToPb(payload.source),
-      rtpParametersJson: JSON.stringify(payload.rtp_parameters),
-      paused: sentPaused,
-    });
+    const res = await this.deps.sfu.publish(
+      {
+        sessionId: this.sessionId,
+        participantId: pid,
+        transportId: send.id,
+        kind: kindToPb(payload.kind),
+        source: sourceToPb(payload.source),
+        rtpParametersJson: JSON.stringify(payload.rtp_parameters),
+        paused: sentPaused,
+      },
+      this.callOptions,
+    );
     // The mute state may have changed while Publish was in flight (set_media_state saw no track
     // to pause yet): re-read it and bring the producer in line before the room learns the track.
     let paused = sentPaused;
@@ -596,7 +623,10 @@ export class RoomController {
     if (current && this.effectivePaused(payload, current) !== sentPaused) {
       paused = !sentPaused;
       try {
-        await this.deps.sfu.setProducerPaused({ producerId: res.producerId, paused });
+        await this.deps.sfu.setProducerPaused(
+          { producerId: res.producerId, paused },
+          this.callOptions,
+        );
       } catch (error) {
         await this.unpublishQuietly(res.producerId);
         throw error;
@@ -622,7 +652,7 @@ export class RoomController {
 
   /** Rollback of a producer the room never learned about; NOT_FOUND means the SFU beat us to it. */
   private async unpublishQuietly(producerId: string): Promise<void> {
-    await this.deps.sfu.unpublish({ producerId }).catch((error: unknown) => {
+    await this.deps.sfu.unpublish({ producerId }, this.callOptions).catch((error: unknown) => {
       if (!isNotFound(error)) this.warn("rollback unpublish failed", error);
     });
   }
@@ -634,7 +664,7 @@ export class RoomController {
       throw new RoomFailure({ code: "FORBIDDEN", message: "not your track" });
     const producerId = this.bindings.producerOf(trackId);
     if (producerId) {
-      await this.deps.sfu.unpublish({ producerId }).catch((error: unknown) => {
+      await this.deps.sfu.unpublish({ producerId }, this.callOptions).catch((error: unknown) => {
         if (!isNotFound(error)) throw error;
       });
       this.bindings.removeProducer(producerId);
@@ -668,7 +698,7 @@ export class RoomController {
     for (const [trackId, binding] of this.bindings.consumersOf(pid)) {
       if (desired.has(trackId)) continue;
       await this.deps.sfu
-        .unsubscribe({ consumerId: binding.consumer_id })
+        .unsubscribe({ consumerId: binding.consumer_id }, this.callOptions)
         .catch((error: unknown) => {
           if (!isNotFound(error)) throw error;
         });
@@ -688,15 +718,18 @@ export class RoomController {
         }
         const producerId = this.bindings.producerOf(trackId);
         if (!producerId) continue;
-        const res = await this.deps.sfu.subscribe({
-          sessionId: this.sessionId,
-          participantId: pid,
-          transportId: recv.id,
-          producerId,
-          rtpCapabilitiesJson: JSON.stringify(caps),
-          maxSpatialLayer: pref.max_layer,
-          priority: pref.priority,
-        });
+        const res = await this.deps.sfu.subscribe(
+          {
+            sessionId: this.sessionId,
+            participantId: pid,
+            transportId: recv.id,
+            producerId,
+            rtpCapabilitiesJson: JSON.stringify(caps),
+            maxSpatialLayer: pref.max_layer,
+            priority: pref.priority,
+          },
+          this.callOptions,
+        );
         const binding: ConsumerBinding = {
           consumer_id: res.consumerId,
           track_id: trackId,
@@ -719,9 +752,11 @@ export class RoomController {
       }
     } catch (error) {
       for (const binding of created) {
-        await this.deps.sfu.unsubscribe({ consumerId: binding.consumer_id }).catch((e: unknown) => {
-          if (!isNotFound(e)) this.warn("rollback unsubscribe failed", e);
-        });
+        await this.deps.sfu
+          .unsubscribe({ consumerId: binding.consumer_id }, this.callOptions)
+          .catch((e: unknown) => {
+            if (!isNotFound(e)) this.warn("rollback unsubscribe failed", e);
+          });
         this.bindings.removeConsumer(binding.consumer_id);
       }
       throw error;
@@ -734,11 +769,14 @@ export class RoomController {
     const priority = pref.priority ?? DEFAULT_PRIORITY;
     const isVideo = this.room.track(binding.track_id)?.kind === "video";
     if (isVideo && (maxLayer !== binding.max_layer || priority !== binding.priority)) {
-      await this.deps.sfu.setLayer({
-        consumerId: binding.consumer_id,
-        spatialLayer: maxLayer,
-        priority,
-      });
+      await this.deps.sfu.setLayer(
+        {
+          consumerId: binding.consumer_id,
+          spatialLayer: maxLayer,
+          priority,
+        },
+        this.callOptions,
+      );
       binding.max_layer = maxLayer;
       binding.priority = priority;
     }
@@ -747,7 +785,10 @@ export class RoomController {
       // A consumer that is not ready yet stays paused at the SFU whatever the preference says;
       // consumer_ready applies the preference then.
       if (binding.ready)
-        await this.deps.sfu.setConsumerPaused({ consumerId: binding.consumer_id, paused });
+        await this.deps.sfu.setConsumerPaused(
+          { consumerId: binding.consumer_id, paused },
+          this.callOptions,
+        );
       binding.paused_pref = paused;
     }
   }
@@ -761,7 +802,10 @@ export class RoomController {
     if (!binding)
       throw new RoomFailure({ code: "NOT_FOUND", message: "no consumer for that track" });
     if (!binding.paused_pref) {
-      await this.deps.sfu.setConsumerPaused({ consumerId: binding.consumer_id, paused: false });
+      await this.deps.sfu.setConsumerPaused(
+        { consumerId: binding.consumer_id, paused: false },
+        this.callOptions,
+      );
     }
     binding.ready = true;
   }
@@ -790,7 +834,8 @@ export class RoomController {
       for (const track of this.room.tracksOf(entry.participant_id, source)) {
         if (track.paused === paused) continue;
         const producerId = this.bindings.producerOf(track.track_id);
-        if (producerId) await this.deps.sfu.setProducerPaused({ producerId, paused });
+        if (producerId)
+          await this.deps.sfu.setProducerPaused({ producerId, paused }, this.callOptions);
       }
     }
   }
@@ -847,12 +892,16 @@ export class RoomController {
     this.audit(actor, "deny", target);
   }
 
-  private async hostMute(actor: string, target: string): Promise<void> {
+  /** Under the target's lock like admit and remove; muting yourself is a plain media state change. */
+  private hostMute(actor: string, target: string): Promise<void> {
     this.requireHost(actor);
-    const entry = this.requireJoined(target);
-    await this.pauseProducers(entry, true, undefined);
-    this.applyOrThrow({ type: "host_mute", actor, participant_id: target });
-    this.audit(actor, "mute", target);
+    if (target === actor) return this.setMediaState(actor, true, undefined);
+    return this.withLock(target, async () => {
+      const entry = this.requireJoined(target);
+      await this.pauseProducers(entry, true, undefined);
+      this.applyOrThrow({ type: "host_mute", actor, participant_id: target });
+      this.audit(actor, "mute", target);
+    });
   }
 
   /** Under the target's lock, so it cannot interleave with the target's own hello or grace expiry. */
@@ -972,7 +1021,8 @@ export class RoomController {
       case "everyone":
         return [...this.room.rosterIds(), ...this.room.lobbyIds()];
       case "only":
-        return target.participant_ids;
+        // A DM to yourself lists you twice; one socket gets one copy.
+        return [...new Set(target.participant_ids)];
       case "all_except":
         return this.room.rosterIds().filter((id) => id !== target.participant_id);
     }
@@ -1027,7 +1077,7 @@ export class RoomController {
   // ---- SFU stats ----
 
   private async allocate(): Promise<void> {
-    const res = await this.deps.sfu.allocateRoom({ sessionId: this.sessionId });
+    const res = await this.deps.sfu.allocateRoom({ sessionId: this.sessionId }, this.callOptions);
     this.rtpCapabilities = parseObject(res.rtpCapabilitiesJson, "rtp capabilities");
   }
 
@@ -1051,7 +1101,7 @@ export class RoomController {
       if (this.room.track(trackId) || !p.meta) continue;
       if (!this.room.inRoster(p.meta.participantId)) {
         void this.deps.sfu
-          .unpublish({ producerId: p.producerId })
+          .unpublish({ producerId: p.producerId }, this.callOptions)
           .catch((e: unknown) => this.warn("orphan unpublish failed", e));
         this.bindings.removeProducer(p.producerId);
         continue;
@@ -1195,8 +1245,19 @@ export class RoomController {
     this.links.clear();
     this.stats.stop();
     const sessionId = this.sessionId;
+    // No WebSocket event (room.ended covers the sockets), but attendance rows need a left_at:
+    // every roster member leaves on the bus before session.ended.
+    const leftAt = new Date().toISOString();
+    for (const entry of this.room.roster()) {
+      this.deps.bus.publish("participant.left", sessionId, {
+        session_id: sessionId,
+        participant_id: entry.participant_id,
+        left_at: leftAt,
+        reason: "ended",
+      });
+    }
     await this.deps.sfu
-      .closeRoom({ sessionId })
+      .closeRoom({ sessionId }, this.callOptions)
       .catch((e: unknown) => this.warn("closeRoom failed", e));
     await this.deps.checkpoint
       .markEnded(reason)
