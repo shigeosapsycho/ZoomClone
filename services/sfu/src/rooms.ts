@@ -285,6 +285,7 @@ export class Room {
 
 export class RoomManager {
   private readonly roomsById = new Map<string, Room>();
+  private readonly pending = new Map<string, Promise<Room>>();
 
   constructor(
     private readonly slots: WorkerSlot[],
@@ -313,10 +314,18 @@ export class RoomManager {
     return room;
   }
 
-  /** Idempotent: a second allocate for the same session returns the existing room. */
+  /** Idempotent, including under concurrent calls: a second allocate awaits the first. */
   async allocate(sessionId: string): Promise<Room> {
     const existing = this.roomsById.get(sessionId);
     if (existing) return existing;
+    const inFlight = this.pending.get(sessionId);
+    if (inFlight) return inFlight;
+    const creation = this.createRoom(sessionId).finally(() => this.pending.delete(sessionId));
+    this.pending.set(sessionId, creation);
+    return creation;
+  }
+
+  private async createRoom(sessionId: string): Promise<Room> {
     const slot = pickWorker(this.slots);
     const router = await guarded(() =>
       slot.worker.createRouter({ mediaCodecs: MEDIA_CODECS, appData: { sessionId } }),

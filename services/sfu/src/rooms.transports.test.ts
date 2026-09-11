@@ -32,6 +32,21 @@ describe("RoomManager rooms", () => {
     expect(() => manager.require("s2")).toThrowError(/not found/);
     expect(ctx.slots[0]!.rooms).toBe(1);
   });
+
+  it("coalesces concurrent allocate calls for the same session", async () => {
+    const sizeBefore = manager.size;
+    const roomsBefore = ctx.slots[0]!.rooms;
+    const rooms = await Promise.all([
+      manager.allocate("race"),
+      manager.allocate("race"),
+      manager.allocate("race"),
+    ]);
+    expect(rooms[1]).toBe(rooms[0]);
+    expect(rooms[2]).toBe(rooms[0]);
+    expect(manager.size).toBe(sizeBefore + 1);
+    expect(ctx.slots[0]!.rooms).toBe(roomsBefore + 1);
+    await manager.close("race");
+  });
 });
 
 describe("Room transports", () => {
