@@ -1,5 +1,11 @@
+import type { AddressInfo } from "node:net";
+import { createClient, type Client } from "@connectrpc/connect";
+import { createGrpcTransport } from "@connectrpc/connect-node";
+import { SfuService } from "@zoomclone/sfu-proto";
 import type { types as ms } from "mediasoup";
+import { createSfuServer } from "../src/app";
 import { loadEnv, type Env } from "../src/env";
+import { createMetrics } from "../src/metrics";
 import { RoomManager, roomOptionsFrom } from "../src/rooms";
 import { closeWorkers, createWorkers, type WorkerSlot } from "../src/workers";
 
@@ -104,4 +110,46 @@ export function videoSimulcastRtpParameters(): ms.RtpParameters {
     ],
     rtcp: { cname: "test-video", reducedSize: true },
   };
+}
+
+export type TestSfu = {
+  env: Env;
+  manager: RoomManager;
+  client: Client<typeof SfuService>;
+  baseUrl: string;
+  stop: () => Promise<void>;
+};
+
+export async function startTestSfu(overrides: Record<string, string> = {}): Promise<TestSfu> {
+  const base = await createTestManager(overrides);
+  const server = createSfuServer(base.manager, createMetrics(base.manager));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const client = createClient(SfuService, createGrpcTransport({ baseUrl }));
+  return {
+    env: base.env,
+    manager: base.manager,
+    client,
+    baseUrl,
+    stop: async () => {
+      await base.stop();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+/** Reads events from a server stream until `count` have arrived or `ms` elapse. */
+export async function take<T>(iter: AsyncIterable<T>, count: number, ms = 5000): Promise<T[]> {
+  const out: T[] = [];
+  const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), ms));
+  const reader = (async () => {
+    for await (const item of iter) {
+      out.push(item);
+      if (out.length >= count) break;
+    }
+    return "done" as const;
+  })();
+  await Promise.race([reader, timeout]);
+  return out;
 }
