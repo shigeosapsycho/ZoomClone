@@ -1,0 +1,6 @@
+:root {
+  --desk: #2e3236;
+}
+body {
+  background: var(--desk);
+}

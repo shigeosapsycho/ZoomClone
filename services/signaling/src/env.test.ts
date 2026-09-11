@@ -12,6 +12,7 @@ describe("signaling env", () => {
     expect(env.SIGNALING_PORT).toBe(8081);
     expect(env.TOKEN_ISSUER).toBe("meeting-api");
     expect(env.MEETING_API_JWKS_URL).toBe("http://localhost:8080/.well-known/jwks.json");
+    expect(env.MEETING_API_PUBLIC_URL).toBe("http://localhost:8080");
     expect(env.SFU_ENDPOINTS).toEqual({ "sfu-local-1": "http://localhost:9090" });
     expect(env.DISCONNECT_GRACE_MS).toBe(30_000);
     expect(env.ROOM_IDLE_TIMEOUT_MS).toBe(300_000);

@@ -166,7 +166,7 @@ Client -> server:
 | `connect_transport` | `{transport: "send" \| "recv", dtls_parameters}` | `{}` |
 | `publish` | `{kind: audio \| video, source: mic \| camera \| screen \| screen_audio, rtp_parameters, paused?}` | `{track_id}` (server-minted) |
 | `unpublish` | `{track_id}` | `{}` |
-| `subscribe` | `{rtp_capabilities?, track_ids: [], prefs: {track_id: {max_layer, priority, paused?}}}` declarative full set; `rtp_capabilities` required on first call, stored | `{consumers: [{track_id, consumer_id, kind, rtp_parameters, producer_paused}], removed: [track_id]}` |
+| `subscribe` | `{rtp_capabilities?, track_ids: [], prefs: {track_id: {max_layer, priority, paused?}}}` declarative full set; `rtp_capabilities` required on first call, stored | `{consumers: [{track_id, consumer_id, producer_id, kind, rtp_parameters, producer_paused}], removed: [track_id]}` |
 | `consumer_ready` | `{track_id}` (client created its consumer; server unpauses it) | `{}` |
 | `set_media_state` | `{muted?, video_off?}` (stored in roster; server pauses/resumes producers, applies to later publishes too) | `{}` |
 | `raise_hand` / `lower_hand` | `{}` | `{}` |

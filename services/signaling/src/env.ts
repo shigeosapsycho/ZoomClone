@@ -33,6 +33,8 @@ export const EnvSchema = z.object({
   REDIS_URL: z.string().min(1),
   TOKEN_ISSUER: z.string().default("meeting-api"),
   MEETING_API_JWKS_URL: z.string().default("http://localhost:8080/.well-known/jwks.json"),
+  /** Where the browser client posts /v1/join (same origin the API's CORS_ORIGINS allows). */
+  MEETING_API_PUBLIC_URL: z.string().default("http://localhost:8080"),
   SFU_ENDPOINTS: endpoints,
   DISCONNECT_GRACE_MS: z.coerce.number().int().min(10).default(30_000),
   ROOM_IDLE_TIMEOUT_MS: z.coerce.number().int().min(10).default(300_000),

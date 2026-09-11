@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ClientMessageSchema,
+  ConsumerParamsSchema,
   HelloAckSchema,
   ServerMessageSchema,
   SubscribeAckSchema,
@@ -215,6 +216,7 @@ describe("ServerMessageSchema", () => {
         {
           track_id: "t",
           consumer_id: "c",
+          producer_id: "p",
           kind: "video",
           rtp_parameters: {},
           producer_paused: false,
@@ -223,5 +225,17 @@ describe("ServerMessageSchema", () => {
       removed: ["old"],
     });
     expect(ok.success).toBe(true);
+  });
+
+  it("requires producer_id on consumer params", () => {
+    const base = {
+      track_id: "t1",
+      consumer_id: "c1",
+      kind: "audio",
+      rtp_parameters: {},
+      producer_paused: false,
+    };
+    expect(ConsumerParamsSchema.safeParse(base).success).toBe(false);
+    expect(ConsumerParamsSchema.safeParse({ ...base, producer_id: "p1" }).success).toBe(true);
   });
 });

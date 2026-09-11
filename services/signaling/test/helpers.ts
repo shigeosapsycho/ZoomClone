@@ -18,6 +18,7 @@ import {
 import { SfuService } from "@zoomclone/sfu-proto";
 import { loadSigningKeys, signSignalingToken, type SigningKeys } from "@zoomclone/tokens";
 import { createApp } from "../src/app";
+import type { HarnessBundle } from "../src/dev/build";
 import { loadEnv, type Env } from "../src/env";
 import { localTokenVerifier } from "../src/gateway/auth";
 import type { ParticipantLink } from "../src/gateway/link";
@@ -382,7 +383,11 @@ export type TestSignaling = {
 export async function startTestSignaling(
   infra: TestInfra,
   sfuBaseUrl: string,
-  opts: { timings?: Partial<RegistryTimings>; env?: Partial<Env> } = {},
+  opts: {
+    timings?: Partial<RegistryTimings>;
+    env?: Partial<Env>;
+    harness?: HarnessBundle;
+  } = {},
 ): Promise<TestSignaling> {
   const registry = createTestRegistry(infra, sfuBaseUrl, opts.timings ?? {});
   const metrics = createMetrics(() => registry.size);
@@ -392,6 +397,7 @@ export async function startTestSignaling(
     env: { ...infra.env, ...opts.env },
     log: silentLog,
     metrics,
+    harness: opts.harness,
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;

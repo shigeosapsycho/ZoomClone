@@ -80,6 +80,8 @@ export type SubscriptionPref = z.infer<typeof SubscriptionPrefSchema>;
 export const ConsumerParamsSchema = z.object({
   track_id: TrackIdSchema,
   consumer_id: z.string(),
+  /** mediasoup-client needs the producer id to build its Consumer. */
+  producer_id: z.string(),
   kind: MediaKindSchema,
   rtp_parameters: OpaqueSchema,
   producer_paused: z.boolean(),

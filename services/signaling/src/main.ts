@@ -3,6 +3,7 @@ import pino from "pino";
 import { createDb } from "@zoomclone/db";
 import { InMemoryEventBus } from "@zoomclone/events";
 import { createApp } from "./app";
+import { buildHarness } from "./dev/build";
 import { loadEnv } from "./env";
 import { remoteTokenVerifier } from "./gateway/auth";
 import { loggerOptions } from "./log";
@@ -46,12 +47,16 @@ const registry = new RoomRegistry({
 });
 const writer = new PostgresWriter(db, bus, log);
 writer.start();
+const harness = env.DEV_HARNESS
+  ? await buildHarness({ apiBase: env.MEETING_API_PUBLIC_URL })
+  : undefined;
 const { server, wss } = createApp({
   registry,
   verifier: remoteTokenVerifier(env.MEETING_API_JWKS_URL, env.TOKEN_ISSUER),
   env,
   log,
   metrics,
+  harness,
 });
 
 let shuttingDown = false;
@@ -91,6 +96,7 @@ server.listen(env.SIGNALING_PORT, "0.0.0.0", () => {
       port: env.SIGNALING_PORT,
       sfus: Object.keys(env.SFU_ENDPOINTS),
       jwks: env.MEETING_API_JWKS_URL,
+      devHarness: env.DEV_HARNESS,
     },
     "signaling listening",
   );

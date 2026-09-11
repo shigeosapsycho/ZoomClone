@@ -464,8 +464,20 @@ describe("RoomController: media", () => {
       type: "ack",
       payload: {
         consumers: [
-          { track_id: "trk1", consumer_id: "c1", kind: "audio", producer_paused: true },
-          { track_id: "trk2", consumer_id: "c2", kind: "video", producer_paused: false },
+          {
+            track_id: "trk1",
+            consumer_id: "c1",
+            producer_id: "p1",
+            kind: "audio",
+            producer_paused: true,
+          },
+          {
+            track_id: "trk2",
+            consumer_id: "c2",
+            producer_id: "p2",
+            kind: "video",
+            producer_paused: false,
+          },
         ],
         removed: [],
       },

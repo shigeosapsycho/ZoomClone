@@ -745,6 +745,7 @@ export class RoomController {
         consumers.push({
           track_id: trackId,
           consumer_id: res.consumerId,
+          producer_id: producerId,
           kind: kindFromPb(res.kind),
           rtp_parameters: parseObject(res.rtpParametersJson, "rtp parameters"),
           producer_paused: res.producerPaused,
