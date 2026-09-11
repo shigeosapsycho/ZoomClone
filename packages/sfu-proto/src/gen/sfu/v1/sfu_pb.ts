@@ -947,7 +947,7 @@ export type ProducerScore = Message<"sfu.v1.ProducerScore"> & {
   producerId: string;
 
   /**
-   * lowest score across simulcast layers, 0..10
+   * highest score across simulcast layers, 0..10; 0 means no layer is sending
    *
    * @generated from field: uint32 score = 2;
    */

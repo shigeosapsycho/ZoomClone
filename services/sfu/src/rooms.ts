@@ -242,11 +242,14 @@ export class Room {
     );
     const layerCount = rtpParameters.encodings?.length ?? 1;
     this.producers.set(producer.id, { producer, meta, transportId, layerCount });
+    // mediasoup scores an encoding that stopped sending as 0, and browsers drop their top simulcast
+    // layer whenever bandwidth dips, so the minimum would pin the event at 0; the maximum tracks
+    // the best layer still flowing and only reaches 0 when nothing is.
     producer.on("score", (scores) =>
       this.emit({
         type: "producer_score",
         producerId: producer.id,
-        score: scores.length ? Math.min(...scores.map((s) => s.score)) : 0,
+        score: scores.length ? Math.max(...scores.map((s) => s.score)) : 0,
       }),
     );
     producer.on("transportclose", () => this.dropProducer(producer.id));
@@ -581,7 +584,29 @@ export class RoomManager {
     return room;
   }
 
+  /** Closes the room; an allocation still in flight for this id is awaited so it cannot survive. */
   async close(sessionId: string): Promise<void> {
+    const inFlight = this.pending.get(sessionId);
+    if (inFlight) await inFlight.catch(() => undefined);
+    this.dropRoom(sessionId);
+  }
+
+  /**
+   * Closes every allocated room now, synchronously; nothing is awaited so callers can run it
+   * inside a signal handler before mediasoup's own handlers close the workers. Allocations still
+   * in flight are not covered: closeAll() awaits those.
+   */
+  closeAllocated(): void {
+    for (const sessionId of [...this.roomsById.keys()]) this.dropRoom(sessionId);
+  }
+
+  /** closeAllocated() plus every allocation that was in flight when the call started. */
+  async closeAll(): Promise<void> {
+    await Promise.allSettled([...this.pending.values()]);
+    this.closeAllocated();
+  }
+
+  private dropRoom(sessionId: string): void {
     const room = this.roomsById.get(sessionId);
     if (!room) return;
     this.roomsById.delete(sessionId);
@@ -646,9 +671,5 @@ export class RoomManager {
       maxSpatialLayer,
       priority,
     );
-  }
-
-  async closeAll(): Promise<void> {
-    for (const sessionId of [...this.roomsById.keys()]) await this.close(sessionId);
   }
 }

@@ -48,6 +48,30 @@ describe("RoomManager rooms", () => {
     expect(ctx.slots[0]!.rooms).toBe(roomsBefore + 1);
     await manager.close("race");
   });
+
+  it("close waits for an in-flight allocation and closes the room it produced", async () => {
+    const allocation = manager.allocate("pending-close");
+    await manager.close("pending-close");
+    const room = await allocation;
+    expect(room.isClosed).toBe(true);
+    expect(manager.get("pending-close")).toBeUndefined();
+  });
+
+  it("closeAllocated closes every allocated room synchronously", async () => {
+    const a = await manager.allocate("sync-a");
+    const b = await manager.allocate("sync-b");
+    manager.closeAllocated();
+    expect(a.isClosed).toBe(true);
+    expect(b.isClosed).toBe(true);
+    expect(manager.size).toBe(0);
+  });
+
+  it("closeAll waits for in-flight allocations so none survives it", async () => {
+    const allocation = manager.allocate("pending-close-all");
+    await manager.closeAll();
+    expect((await allocation).isClosed).toBe(true);
+    expect(manager.size).toBe(0);
+  });
 });
 
 describe("Room transports", () => {
