@@ -26,6 +26,8 @@ export const EnvSchema = z
     OIDC_ISSUER: z.string().optional(),
     OIDC_AUDIENCE: z.string().default("zoomclone"),
     OIDC_JWKS_URL: z.string().optional(),
+    // When true, bearer tokens without an org_id claim are rejected in remote OIDC mode.
+    OIDC_REQUIRE_ORG: bool,
     OIDC_ALGORITHMS: z
       .string()
       .default("RS256,ES256")

@@ -1,6 +1,8 @@
 import { SignJWT, generateKeyPair } from "jose";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { bearer, createTestContext, mintUser, type TestContext } from "../../test/helpers";
+import { orgIdFromClaim } from "./user-id";
+import { OidcUserVerifier } from "./user-verifier";
 
 let ctx: TestContext;
 
@@ -64,6 +66,22 @@ describe("auth", () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it("maps a non-UUID org_id claim through orgIdFromClaim, scoped by issuer", async () => {
+    const token = await new SignJWT({ org_id: "org_abc" })
+      .setProtectedHeader({ alg: "ES256", kid: ctx.deps.keys.kid })
+      .setIssuer(ctx.env.DEV_ISSUER_URL)
+      .setAudience(ctx.env.OIDC_AUDIENCE)
+      .setSubject("2f6a2b6e-6f0b-4c1e-9a52-0c5d3f1a9b12")
+      .setIssuedAt()
+      .setExpirationTime("1h")
+      .sign(ctx.deps.keys.privateKey);
+    const res = await ctx.app.inject({ method: "GET", url: "/v1/me", headers: bearer(token) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      org_id: orgIdFromClaim(ctx.env.DEV_ISSUER_URL, "org_abc"),
+    });
+  });
+
   it("rejects tokens whose algorithm is not allowed", async () => {
     const { privateKey } = await generateKeyPair("RS256");
     const forged = await new SignJWT({})
@@ -76,6 +94,36 @@ describe("auth", () => {
       .sign(privateKey);
     const res = await ctx.app.inject({ method: "GET", url: "/v1/me", headers: bearer(forged) });
     expect(res.statusCode).toBe(401);
+  });
+
+  it("OidcUserVerifier with requireOrg rejects tokens with no org_id and accepts a UUID org", async () => {
+    const verifier = new OidcUserVerifier({
+      key: ctx.deps.keys.publicKey,
+      issuer: ctx.env.DEV_ISSUER_URL,
+      audience: ctx.env.OIDC_AUDIENCE,
+      algorithms: ["ES256"],
+      defaultOrgId: ctx.env.DEFAULT_ORG_ID,
+      requireOrg: true,
+    });
+    const sign = (claims: Record<string, unknown>) =>
+      new SignJWT(claims)
+        .setProtectedHeader({ alg: "ES256", kid: ctx.deps.keys.kid })
+        .setIssuer(ctx.env.DEV_ISSUER_URL)
+        .setAudience(ctx.env.OIDC_AUDIENCE)
+        .setSubject("2f6a2b6e-6f0b-4c1e-9a52-0c5d3f1a9b12")
+        .setIssuedAt()
+        .setExpirationTime("1h")
+        .sign(ctx.deps.keys.privateKey);
+
+    const withoutOrg = await sign({});
+    await expect(verifier.verify(withoutOrg)).rejects.toMatchObject({
+      code: "UNAUTHORIZED",
+      status: 401,
+    });
+
+    const orgId = "22222222-2222-4222-8222-222222222222";
+    const withOrg = await sign({ org_id: orgId });
+    await expect(verifier.verify(withOrg)).resolves.toMatchObject({ orgId });
   });
 
   it("does not serve the dev issuer when it is disabled", async () => {

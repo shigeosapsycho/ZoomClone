@@ -3,7 +3,7 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } 
 import { ApiError } from "@zoomclone/protocol";
 import type { SigningKeys } from "@zoomclone/tokens";
 import type { Env } from "../env";
-import { isUuid, userIdFromSubject } from "./user-id";
+import { orgIdFromClaim, userIdFromSubject } from "./user-id";
 
 export type AuthUser = { id: string; orgId: string; name: string };
 
@@ -20,6 +20,7 @@ export class OidcUserVerifier implements UserVerifier {
       audience: string;
       algorithms: string[];
       defaultOrgId: string;
+      requireOrg: boolean;
     },
   ) {}
 
@@ -38,8 +39,14 @@ export class OidcUserVerifier implements UserVerifier {
     }
     if (!payload.sub) throw new ApiError("UNAUTHORIZED", "token has no subject");
     const orgClaim = payload["org_id"];
-    const orgId =
-      typeof orgClaim === "string" && isUuid(orgClaim) ? orgClaim : this.opts.defaultOrgId;
+    let orgId: string;
+    if (typeof orgClaim === "string" && orgClaim.trim()) {
+      orgId = orgIdFromClaim(payload.iss ?? issuer, orgClaim);
+    } else if (this.opts.requireOrg) {
+      throw new ApiError("UNAUTHORIZED", "token has no org_id claim");
+    } else {
+      orgId = this.opts.defaultOrgId;
+    }
     const nameClaim = payload["name"];
     const name = typeof nameClaim === "string" && nameClaim.trim() ? nameClaim.trim() : "User";
     return { id: userIdFromSubject(payload.iss ?? issuer, payload.sub), orgId, name };
@@ -54,12 +61,14 @@ export function createUserVerifier(env: Env, keys: SigningKeys): UserVerifier {
       audience: env.OIDC_AUDIENCE,
       algorithms: ["ES256"],
       defaultOrgId: env.DEFAULT_ORG_ID,
+      requireOrg: false,
     });
   }
   return new OidcUserVerifier({
     key: createRemoteJWKSet(new URL(env.OIDC_JWKS_URL as string)),
     issuer: env.OIDC_ISSUER as string,
     audience: env.OIDC_AUDIENCE,
+    requireOrg: env.OIDC_REQUIRE_ORG,
     algorithms: env.OIDC_ALGORITHMS,
     defaultOrgId: env.DEFAULT_ORG_ID,
   });
