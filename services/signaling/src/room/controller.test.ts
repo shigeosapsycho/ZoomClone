@@ -1,0 +1,612 @@
+import { setTimeout as sleep } from "node:timers/promises";
+import { Code } from "@connectrpc/connect";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { CloseCode, type ClientMessage } from "@zoomclone/protocol";
+import { TransportDirection } from "@zoomclone/sfu-proto";
+import { FakeSfu, FAKE_RTP_CAPABILITIES } from "../../test/fake-sfu";
+import {
+  FakeLink,
+  createTestController,
+  createTestInfra,
+  mintClaims,
+  seedSession,
+  waitFor,
+  type TestController,
+  type TestInfra,
+} from "../../test/helpers";
+import { roomKeys } from "./checkpoint";
+import { Room } from "./room";
+
+const HOST = "11111111-1111-4111-8111-111111111111";
+const A = "22222222-2222-4222-8222-222222222222";
+const B = "33333333-3333-4333-8333-333333333333";
+const W = "44444444-4444-4444-8444-444444444444";
+
+let infra: TestInfra;
+let sfu: FakeSfu;
+let live: TestController[] = [];
+
+beforeAll(async () => {
+  infra = await createTestInfra();
+});
+afterAll(async () => {
+  await infra.close();
+});
+beforeEach(async () => {
+  await infra.redis.flushdb();
+  sfu = new FakeSfu();
+  await sfu.start();
+});
+afterEach(async () => {
+  for (const t of live) await t.controller.close();
+  live = [];
+  await sfu.stop();
+});
+
+async function startRoom(sessionId?: string, room?: Room): Promise<TestController> {
+  const t = await createTestController({ infra, sfu, sessionId, room });
+  live.push(t);
+  return t;
+}
+
+const CAPS = { codecs: [{ mimeType: "video/VP8", clockRate: 90000 }], headerExtensions: [] };
+
+function msg<T extends ClientMessage["type"]>(
+  type: T,
+  payload: Extract<ClientMessage, { type: T }>["payload"],
+  id = `${type}-${Math.random().toString(36).slice(2, 8)}`,
+): Extract<ClientMessage, { type: T }> {
+  return { type, id, payload } as Extract<ClientMessage, { type: T }>;
+}
+
+/** Joins with a fresh link; returns the link once the welcome arrived. */
+async function join(
+  t: TestController,
+  overrides: {
+    participant_id: string;
+    role?: "host" | "attendee";
+    display_name?: string;
+    lobby?: boolean;
+  },
+): Promise<FakeLink> {
+  const link = new FakeLink();
+  const claims = mintClaims({ session_id: t.room.sessionId, ...overrides });
+  const pid = await t.controller.attach(link, claims, {
+    id: `hello-${overrides.participant_id.slice(0, 4)}`,
+  });
+  if (pid === null) throw new Error(`attach closed the link: ${JSON.stringify(link.closedWith)}`);
+  return link;
+}
+
+async function request<T extends ClientMessage["type"]>(
+  t: TestController,
+  link: FakeLink,
+  pid: string,
+  type: T,
+  payload: Extract<ClientMessage, { type: T }>["payload"],
+) {
+  const m = msg(type, payload as never);
+  await t.controller.handle(link, pid, m as never);
+  const reply = link.sent.find((s) => (s.type === "ack" || s.type === "error") && s.id === m.id);
+  if (!reply) throw new Error(`no reply for ${type}`);
+  return reply;
+}
+
+describe("RoomController: joining", () => {
+  it("creates both transports first, then welcome with media, and tells the others", async () => {
+    const t = await startRoom();
+    const joined: unknown[] = [];
+    infra.bus.subscribe("participant.joined", (e) => {
+      joined.push(e.payload);
+    });
+    const host = await join(t, { participant_id: HOST, role: "host", display_name: "Host" });
+    expect(sfu.callsTo("createTransport").map((c) => c.request["direction"])).toEqual([
+      TransportDirection.SEND,
+      TransportDirection.RECV,
+    ]);
+    expect(host.sent[0]).toEqual({
+      type: "ack",
+      id: "hello-1111",
+      payload: { mode: "welcome", epoch: 1, seq: 1 },
+    });
+    expect(host.sent[1]).toMatchObject({
+      type: "welcome",
+      payload: {
+        participant_id: HOST,
+        role: "host",
+        state: "joined",
+        seq: 1,
+        lobby: [],
+        media: {
+          rtp_capabilities: FAKE_RTP_CAPABILITIES,
+          send_transport: { id: "t1", ice_parameters: { usernameFragment: "ufrag1" } },
+          recv_transport: { id: "t2" },
+        },
+      },
+    });
+    const ann = await join(t, { participant_id: A, display_name: "Ann" });
+    expect(host.last()).toMatchObject({
+      type: "participant.joined",
+      seq: 2,
+      payload: { participant: { participant_id: A, name: "Ann", role: "attendee" } },
+    });
+    expect(ann.ofType("participant.joined")).toEqual([]);
+    expect(ann.ofType("welcome")[0]?.payload.lobby).toBeUndefined();
+    await infra.bus.drain();
+    expect(joined).toHaveLength(2);
+    expect(joined[1]).toMatchObject({
+      participant_id: A,
+      display_name: "Ann",
+      role: "attendee",
+      user_id: null,
+    });
+    await sleep(60);
+    expect(await infra.redis.hlen(roomKeys(t.room.sessionId).roster)).toBe(2);
+    expect(t.controller.connectionCount).toBe(2);
+  });
+
+  it("rolls the first transport back when the second CreateTransport fails and keeps the roster clean", async () => {
+    const t = await startRoom();
+    sfu.failNext("createTransport", Code.Internal, 1);
+    const link = new FakeLink();
+    const pid = await t.controller.attach(
+      link,
+      mintClaims({ session_id: t.room.sessionId, participant_id: A }),
+      { id: "h" },
+    );
+    expect(pid).toBeNull();
+    expect(link.ofType("error")[0]?.payload.code).toBe("SFU_ERROR");
+    expect(link.closedWith?.code).toBe(1011);
+    expect(t.room.inRoster(A)).toBe(false);
+    expect(sfu.callsTo("closeTransport").map((c) => c.request["transportId"])).toEqual(["t1"]);
+    expect(t.controller.connectionCount).toBe(0);
+  });
+
+  it("refuses locked, full, ended and departed participants with the mapped close codes", async () => {
+    const t = await startRoom();
+    const host = await join(t, { participant_id: HOST, role: "host" });
+    await request(t, host, HOST, "host.lock", { locked: true });
+    const locked = new FakeLink();
+    expect(
+      await t.controller.attach(
+        locked,
+        mintClaims({ session_id: t.room.sessionId, participant_id: A }),
+        { id: "h" },
+      ),
+    ).toBeNull();
+    expect(locked.closedWith?.code).toBe(CloseCode.LOCKED);
+    expect(sfu.callsTo("createTransport")).toHaveLength(2);
+    await request(t, host, HOST, "host.lock", { locked: false });
+    const ann = await join(t, { participant_id: A });
+    await request(t, host, HOST, "host.remove", { participant_id: A });
+    expect(ann.closedWith?.code).toBe(CloseCode.REMOVED);
+    const again = new FakeLink();
+    expect(
+      await t.controller.attach(
+        again,
+        mintClaims({ session_id: t.room.sessionId, participant_id: A }),
+        { id: "h" },
+      ),
+    ).toBeNull();
+    expect(again.closedWith?.code).toBe(CloseCode.REMOVED);
+  });
+});
+
+describe("RoomController: lobby", () => {
+  it("waiters get a lobby welcome, hosts get lobby.request; admit sends lobby.result then resync with media", async () => {
+    const t = await startRoom();
+    const host = await join(t, { participant_id: HOST, role: "host" });
+    const waiter = await join(t, { participant_id: W, lobby: true, display_name: "Wren" });
+    expect(waiter.sent).toEqual([
+      { type: "ack", id: "hello-4444", payload: { mode: "welcome", epoch: 1, seq: 2 } },
+      {
+        type: "welcome",
+        payload: { participant_id: W, role: "attendee", epoch: 1, seq: 2, state: "lobby" },
+      },
+    ]);
+    expect(host.last()).toMatchObject({
+      type: "lobby.request",
+      payload: { participant_id: W, name: "Wren" },
+    });
+    expect(sfu.callsTo("createTransport")).toHaveLength(2);
+
+    const reply = await request(t, host, HOST, "host.admit", { participant_id: W });
+    expect(reply.type).toBe("ack");
+    expect(waiter.sent.slice(2).map((m) => m.type)).toEqual(["lobby.result", "resync"]);
+    expect(waiter.ofType("resync")[0]?.payload).toMatchObject({
+      state: "joined",
+      media: { send_transport: { id: "t3" }, recv_transport: { id: "t4" } },
+    });
+    // The fanout runs inside dispatch, so the host sees the join notice right before its own ack.
+    expect(host.sent.at(-2)).toMatchObject({
+      type: "participant.joined",
+      payload: { participant: { participant_id: W } },
+    });
+    expect(host.last()?.type).toBe("ack");
+    expect(t.room.inRoster(W)).toBe(true);
+  });
+
+  it("deny answers the waiter, closes 4003, tells hosts lobby.left; a waiter's disconnect also leaves the lobby", async () => {
+    const t = await startRoom();
+    const host = await join(t, { participant_id: HOST, role: "host" });
+    const waiter = await join(t, { participant_id: W, lobby: true });
+    await request(t, host, HOST, "host.deny", { participant_id: W });
+    expect(waiter.ofType("lobby.result")[0]?.payload).toEqual({ admitted: false });
+    expect(waiter.closedWith?.code).toBe(CloseCode.LOBBY_DENIED);
+    expect(host.ofType("lobby.left")[0]?.payload).toEqual({ participant_id: W });
+    expect(t.room.departed(W)).toBe("denied");
+
+    const other = await join(t, { participant_id: A, lobby: true });
+    t.controller.detach(other, A);
+    expect(host.ofType("lobby.left")).toHaveLength(2);
+    expect(t.room.inLobby(A)).toBe(false);
+    expect(t.room.departed(A)).toBeUndefined();
+  });
+});
+
+describe("RoomController: media", () => {
+  it("publish honours the mute state, subscribe diffs consumers, consumer_ready resumes, prefs call SetLayer", async () => {
+    const t = await startRoom();
+    const ann = await join(t, { participant_id: A });
+    const bob = await join(t, { participant_id: B });
+    await request(t, ann, A, "connect_transport", {
+      transport: "send",
+      dtls_parameters: { role: "client" },
+    });
+    expect(sfu.callsTo("connectTransport")[0]?.request["transportId"]).toBe("t1");
+
+    await request(t, ann, A, "set_media_state", { muted: true });
+    expect(bob.last()).toMatchObject({
+      type: "participant.updated",
+      payload: { participant_id: A, patch: { muted: true } },
+    });
+    const mic = await request(t, ann, A, "publish", {
+      kind: "audio",
+      source: "mic",
+      rtp_parameters: { codecs: [] },
+      paused: false,
+    });
+    expect(mic).toMatchObject({ type: "ack", payload: { track_id: "trk1" } });
+    expect(sfu.callsTo("publish")[0]?.request["paused"]).toBe(true);
+    expect(bob.last()).toMatchObject({
+      type: "track.added",
+      payload: { track: { track_id: "trk1", owner: A, paused: true, layers: 1 } },
+    });
+    const cam = await request(t, ann, A, "publish", {
+      kind: "video",
+      source: "camera",
+      rtp_parameters: { codecs: [] },
+      paused: false,
+    });
+    expect(cam).toMatchObject({ type: "ack", payload: { track_id: "trk2" } });
+
+    const noCaps = await request(t, bob, B, "subscribe", {
+      track_ids: ["trk1", "trk2"],
+      prefs: {},
+    });
+    expect(noCaps).toMatchObject({ type: "error", payload: { code: "INVALID" } });
+    const first = await request(t, bob, B, "subscribe", {
+      rtp_capabilities: CAPS,
+      track_ids: ["trk1", "trk2"],
+      prefs: {},
+    });
+    expect(first).toMatchObject({
+      type: "ack",
+      payload: {
+        consumers: [
+          { track_id: "trk1", consumer_id: "c1", kind: "audio", producer_paused: true },
+          { track_id: "trk2", consumer_id: "c2", kind: "video", producer_paused: false },
+        ],
+        removed: [],
+      },
+    });
+    expect(sfu.room(t.room.sessionId)?.consumers.get("c2")?.paused).toBe(true);
+    await request(t, bob, B, "consumer_ready", { track_id: "trk2" });
+    expect(sfu.room(t.room.sessionId)?.consumers.get("c2")?.paused).toBe(false);
+
+    const prefs = await request(t, bob, B, "subscribe", {
+      track_ids: ["trk1", "trk2"],
+      prefs: { trk2: { max_layer: 0 } },
+    });
+    expect(prefs).toMatchObject({ type: "ack", payload: { consumers: [], removed: [] } });
+    expect(sfu.callsTo("setLayer")).toHaveLength(1);
+    expect(sfu.callsTo("setLayer")[0]?.request).toMatchObject({
+      consumerId: "c2",
+      spatialLayer: 0,
+    });
+
+    const drop = await request(t, bob, B, "subscribe", {
+      track_ids: ["trk2"],
+      prefs: { trk2: { max_layer: 0 } },
+    });
+    expect(drop).toMatchObject({ type: "ack", payload: { consumers: [], removed: ["trk1"] } });
+    expect(sfu.callsTo("unsubscribe")[0]?.request["consumerId"]).toBe("c1");
+
+    await request(t, ann, A, "set_media_state", { muted: false });
+    expect(sfu.callsTo("setProducerPaused")[0]?.request).toMatchObject({
+      producerId: "p1",
+      paused: false,
+    });
+    expect(bob.ofType("track.updated").at(-1)?.payload).toEqual({
+      track_id: "trk1",
+      patch: { paused: false },
+    });
+
+    const unpublish = await request(t, ann, A, "unpublish", { track_id: "trk2" });
+    expect(unpublish.type).toBe("ack");
+    expect(sfu.callsTo("unpublish")[0]?.request["producerId"]).toBe("p2");
+    expect(bob.last()).toMatchObject({ type: "track.removed", payload: { track_id: "trk2" } });
+    expect((await request(t, bob, B, "unpublish", { track_id: "trk1" })).type).toBe("error");
+    expect((await request(t, bob, B, "restart_ice", { transport: "send" })).payload).toMatchObject({
+      code: "NOT_IMPLEMENTED",
+    });
+  });
+
+  it("stats events: layers reach only the subscriber, speakers become active_speakers, producer_closed drops the track", async () => {
+    const t = await startRoom();
+    const S = t.room.sessionId;
+    const ann = await join(t, { participant_id: A });
+    const bob = await join(t, { participant_id: B });
+    await request(t, ann, A, "publish", {
+      kind: "video",
+      source: "camera",
+      rtp_parameters: {},
+      paused: false,
+    });
+    await request(t, bob, B, "subscribe", {
+      rtp_capabilities: CAPS,
+      track_ids: ["trk1"],
+      prefs: {},
+    });
+
+    sfu.emit(S, {
+      case: "consumerLayers",
+      value: { consumerId: "c1", active: true, spatialLayer: 1, temporalLayer: 2 },
+    });
+    const layers = await bob.waitFor("track.updated");
+    expect(layers.payload).toEqual({ track_id: "trk1", patch: { layers: 2 } });
+    expect(ann.ofType("track.updated")).toEqual([]);
+
+    sfu.emit(S, {
+      case: "dominantSpeakers",
+      value: { speakers: [{ participantId: A, producerId: "p1", volume: -20 }] },
+    });
+    await sleep(320);
+    sfu.emit(S, {
+      case: "dominantSpeakers",
+      value: { speakers: [{ participantId: A, producerId: "p1", volume: -20 }] },
+    });
+    const active = await bob.waitFor("active_speakers");
+    expect(active.payload).toEqual({ participant_ids: [A] });
+    expect(ann.ofType("active_speakers")[0]?.payload).toEqual({ participant_ids: [A] });
+    sfu.emit(S, { case: "silence", value: {} });
+    await bob.waitFor("active_speakers", (m) => m.payload.participant_ids.length === 0);
+
+    sfu.emit(S, {
+      case: "producerClosed",
+      value: { producerId: "p1", trackId: "trk1", participantId: A },
+    });
+    const removed = await bob.waitFor("track.removed");
+    expect(removed.payload).toEqual({ track_id: "trk1" });
+    expect(t.room.tracks()).toEqual([]);
+  });
+});
+
+describe("RoomController: presence and reconnects", () => {
+  it("disconnect starts the grace; a reconnect with a valid cursor replays; grace expiry leaves and closes transports", async () => {
+    const t = await startRoom();
+    const S = t.room.sessionId;
+    const ann = await join(t, { participant_id: A });
+    const bob = await join(t, { participant_id: B });
+    const annSeq = t.room.seq;
+    t.controller.detach(ann, A);
+    expect(bob.last()).toMatchObject({
+      type: "participant.updated",
+      payload: { participant_id: A, patch: { connected: false } },
+    });
+    await request(t, bob, B, "reaction", { emoji: "wave" });
+    await request(t, bob, B, "chat", { body: "psst", to: A });
+
+    const back = new FakeLink();
+    const pid = await t.controller.attach(back, mintClaims({ session_id: S, participant_id: A }), {
+      id: "re",
+      resume_seq: annSeq,
+      epoch: 1,
+    });
+    expect(pid).toBe(A);
+    // The disconnect notice went to everyone except A, so A gets only the reaction and the DM.
+    expect(back.sent.map((m) => m.type)).toEqual(["ack", "reaction", "chat"]);
+    expect(back.sent[0]).toMatchObject({ payload: { mode: "replay" } });
+    expect(sfu.callsTo("createTransport")).toHaveLength(4);
+    expect(bob.last()).toMatchObject({
+      type: "participant.updated",
+      payload: { participant_id: A, patch: { connected: true } },
+    });
+
+    const left: unknown[] = [];
+    infra.bus.subscribe("participant.left", (e) => {
+      left.push(e.payload);
+    });
+    t.controller.detach(back, A);
+    await bob.waitFor("participant.left");
+    expect(bob.ofType("participant.left")[0]?.payload).toEqual({
+      participant_id: A,
+      reason: "timeout",
+    });
+    // The leave is fanned out before the transports are closed; give the two SFU calls time to land.
+    await waitFor(() => sfu.callsTo("closeTransport").length === 2);
+    expect(
+      sfu
+        .callsTo("closeTransport")
+        .map((c) => c.request["transportId"])
+        .sort(),
+    ).toEqual(["t1", "t2"]);
+    await infra.bus.drain();
+    expect(left[0]).toMatchObject({ participant_id: A, reason: "timeout" });
+    const late = new FakeLink();
+    expect(
+      await t.controller.attach(late, mintClaims({ session_id: S, participant_id: A }), {
+        id: "x",
+      }),
+    ).toBeNull();
+    expect(late.closedWith?.code).toBe(CloseCode.REJOIN_REQUIRED);
+  });
+
+  it("resyncs on an epoch mismatch or stale cursor, and a newer connection replaces the older one with 4005 and no grace", async () => {
+    const t = await startRoom();
+    const S = t.room.sessionId;
+    const ann = await join(t, { participant_id: A });
+    const bob = await join(t, { participant_id: B });
+    const stale = new FakeLink();
+    await t.controller.attach(stale, mintClaims({ session_id: S, participant_id: A }), {
+      id: "s",
+      resume_seq: 0,
+      epoch: 7,
+    });
+    expect(stale.sent.map((m) => m.type)).toEqual(["ack", "resync"]);
+    expect(stale.sent[0]).toMatchObject({ payload: { mode: "resync" } });
+    expect(stale.ofType("resync")[0]?.payload.media?.send_transport.id).toBe("t1");
+    expect(ann.closedWith?.code).toBe(CloseCode.REPLACED);
+    t.controller.detach(ann, A);
+    expect(bob.ofType("participant.updated")).toEqual([]);
+    expect(t.room.rosterEntry(A)?.connected).toBe(true);
+  });
+});
+
+describe("RoomController: ending", () => {
+  it("host.end acks first, then room.ended to everyone, closes 4004, CloseRoom, Redis ended, Postgres ended with peak", async () => {
+    const { meetingId, sessionId } = await seedSession(infra.db);
+    const t = await startRoom(sessionId);
+    const ended: unknown[] = [];
+    infra.bus.subscribe("session.ended", (e) => {
+      ended.push(e.payload);
+    });
+    const host = await join(t, { participant_id: HOST, role: "host" });
+    const ann = await join(t, { participant_id: A });
+    const waiter = await join(t, { participant_id: W, lobby: true });
+    const attendee = await request(t, ann, A, "host.end", {});
+    expect(attendee).toMatchObject({ type: "error", payload: { code: "FORBIDDEN" } });
+    const m = msg("host.end", {});
+    await t.controller.handle(host, HOST, m);
+    expect(host.sent.map((x) => x.type).slice(-2)).toEqual(["ack", "room.ended"]);
+    expect(host.ofType("room.ended")[0]?.payload).toEqual({ reason: "host_end" });
+    expect(ann.ofType("room.ended")).toHaveLength(1);
+    expect(waiter.ofType("room.ended")).toHaveLength(1);
+    for (const link of [host, ann, waiter])
+      expect(link.closedWith?.code).toBe(CloseCode.ROOM_ENDED);
+    expect(await t.gone).toBe(sessionId);
+    expect(sfu.callsTo("closeRoom")).toHaveLength(1);
+    expect(await infra.redis.hgetall(roomKeys(sessionId).meta)).toMatchObject({
+      status: "ended",
+      end_reason: "host_end",
+    });
+    const [session] = await infra.db<{ endedAt: Date | null; peakParticipants: number | null }[]>`
+      SELECT ended_at, peak_participants FROM meeting_sessions WHERE id = ${sessionId}`;
+    expect(session?.endedAt).not.toBeNull();
+    expect(session?.peakParticipants).toBe(2);
+    const [meeting] = await infra.db<{ status: string }[]>`
+      SELECT status FROM meetings WHERE id = ${meetingId}`;
+    expect(meeting?.status).toBe("ended");
+    await infra.bus.drain();
+    expect(ended[0]).toMatchObject({
+      session_id: sessionId,
+      reason: "host_end",
+      peak_participants: 2,
+    });
+    expect(await infra.redis.exists(roomKeys(sessionId).owner)).toBe(0);
+  });
+
+  it("an idle room ends with reason idle and the meeting returns to scheduled; endRoom runs once", async () => {
+    const { meetingId, sessionId } = await seedSession(infra.db);
+    const t = await startRoom(sessionId);
+    const ann = await join(t, { participant_id: A });
+    await sleep(500);
+    expect(t.controller.isGone).toBe(false);
+    t.controller.detach(ann, A);
+    expect(await t.gone).toBe(sessionId);
+    // The database is truncated once per file, so earlier tests' meetings are still there.
+    const [meeting] = await infra.db<{ status: string }[]>`
+      SELECT status FROM meetings WHERE id = ${meetingId}`;
+    expect(meeting?.status).toBe("scheduled");
+    await Promise.all([t.controller.endRoom("api_end"), t.controller.endRoom("api_end")]);
+    expect(sfu.callsTo("closeRoom")).toHaveLength(1);
+  });
+
+  it("api_end from the control plane ends the room even with nobody connected, and close keeps the room rehydratable", async () => {
+    const { sessionId } = await seedSession(infra.db);
+    const t = await startRoom(sessionId);
+    await join(t, { participant_id: A });
+    await t.controller.close();
+    expect(await infra.redis.hget(roomKeys(sessionId).meta, "status")).toBe("live");
+    expect(await infra.redis.exists(roomKeys(sessionId).owner)).toBe(0);
+    const again = await startRoom(
+      sessionId,
+      Room.fromSnapshot(t.room.toSnapshot(), { bumpEpoch: true }),
+    );
+    await again.controller.endRoom("api_end");
+    expect(await infra.redis.hget(roomKeys(sessionId).meta, "end_reason")).toBe("api_end");
+  });
+});
+
+describe("RoomController: rehydrate reconcile", () => {
+  it("drops checkpointed tracks without producers, adds live producers, and reuses snapshot transports on resync", async () => {
+    const S = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const { transportIds } = sfu.seedRoom(S, {
+      transports: [
+        { participantId: A, direction: "send" },
+        { participantId: A, direction: "recv" },
+      ],
+      producers: [{ participantId: A, trackId: "live-cam", kind: "video", source: "camera" }],
+    });
+    const snapshot = Room.create({
+      session_id: S,
+      home_sfu: "fake-sfu",
+      lobby_enabled: true,
+      max_participants: 10,
+    });
+    snapshot.apply({ type: "join", participant_id: A, name: "Ann", role: "attendee" });
+    snapshot.apply({ type: "join", participant_id: B, name: "Bob", role: "attendee" });
+    snapshot.apply({
+      type: "publish",
+      participant_id: A,
+      track: {
+        track_id: "stale-mic",
+        owner: A,
+        kind: "audio",
+        source: "mic",
+        paused: false,
+        layers: 1,
+      },
+    });
+    const room = Room.fromSnapshot(snapshot.toSnapshot(), { bumpEpoch: true });
+    const t = await startRoom(undefined, room);
+    expect(room.epoch).toBe(2);
+    expect(room.tracks().map((x) => x.track_id)).toEqual(["live-cam"]);
+    expect(room.track("live-cam")).toMatchObject({
+      owner: A,
+      kind: "video",
+      source: "camera",
+      layers: 3,
+    });
+
+    const ann = new FakeLink();
+    await t.controller.attach(ann, mintClaims({ session_id: S, participant_id: A }), {
+      id: "h",
+      resume_seq: 3,
+      epoch: 1,
+    });
+    expect(ann.sent[0]).toMatchObject({ payload: { mode: "resync", epoch: 2 } });
+    expect(ann.ofType("resync")[0]?.payload.media).toMatchObject({
+      send_transport: { id: transportIds[0] },
+      recv_transport: { id: transportIds[1] },
+    });
+    expect(sfu.callsTo("createTransport")).toHaveLength(0);
+
+    const bob = new FakeLink();
+    await t.controller.attach(bob, mintClaims({ session_id: S, participant_id: B }), { id: "h2" });
+    expect(bob.ofType("resync")[0]?.payload.media?.send_transport.id).toBe("t3");
+    expect(sfu.callsTo("createTransport")).toHaveLength(2);
+    await sleep(400);
+    expect(t.room.inRoster(B)).toBe(true);
+  });
+});
