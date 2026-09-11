@@ -230,12 +230,17 @@ function startSession(joined: JoinResponse): void {
       onStatus: (next) => {
         status = next;
         if (next === "joined" && onAirSince === null) onAirSince = Date.now();
+        // A replay brings no snapshot, so nothing else redrives a subscribe the drop cut short;
+        // welcome and resync resubscribe from the snapshot path.
+        if (next === "joined" && signaling?.lastAck?.mode === "replay")
+          void resubscribe().catch(report);
         render();
       },
       onClosed: (info) => {
         closes.push(info);
         ui.tape(view.seq, `socket closed ${info.code} ${info.reason}`);
-        if (info.terminal && info.code !== 1000) {
+        // A chosen close is the leave handler's business, whatever code the socket reports.
+        if (info.terminal && !info.chosen && info.code !== 1000) {
           const ended = info.code === CloseCode.ROOM_ENDED || view.state === "ended";
           screen = ended ? "ended" : "closed";
           // The ended panel's heading says what happened; every other close carries its reason.

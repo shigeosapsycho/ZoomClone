@@ -110,6 +110,18 @@ function rocker(
   return button;
 }
 
+const SOURCE_ORDER = ["mic", "camera", "screen"] as const;
+
+/** The sources a participant publishes, as legend tokens; a screen share's audio folds into "screen". */
+function publishedSources(model: UiModel, participantId: string): string[] {
+  const sources = new Set<string>();
+  for (const track of model.view.tracks) {
+    if (track.owner !== participantId) continue;
+    sources.add(track.source === "screen_audio" ? "screen" : track.source);
+  }
+  return SOURCE_ORDER.filter((source) => sources.has(source));
+}
+
 function fmtClock(ms: number): string {
   const total = Math.floor(ms / 1000);
   const m = Math.floor(total / 60);
@@ -305,7 +317,15 @@ export function createUi(root: HTMLElement, actions: UiActions): Ui {
     if (screen === "room") root.replaceChildren(tallyBar, stage, rack, strip, tape);
     else if (screen === "waiting") root.replaceChildren(tallyBar, panelBand, tape);
     else root.replaceChildren(tallyBar, panelBand);
-    if (screen !== "room") for (const [pid, tile] of tiles) removeTile(pid, tile);
+    if (screen !== "room") {
+      for (const [pid, tile] of tiles) removeTile(pid, tile);
+      // The feeds go with the tiles. Clearing frameLoops is what stops a loop (its next tick
+      // sees a foreign symbol); left alone, the closures would keep the detached <video>s.
+      feedOwner.clear();
+      feedTracks.clear();
+      frameCounts.clear();
+      frameLoops.clear();
+    }
     tapeDirty = true;
     shownScreen = screen;
   }
@@ -451,9 +471,22 @@ export function createUi(root: HTMLElement, actions: UiActions): Ui {
     const speaking = model.view.activeSpeakers.includes(entry.participant_id);
     setData(tile.root, "speaking", String(speaking));
     setData(tile.lamp, "on", speaking ? "tally" : entry.connected ? "" : "amber");
+    // The lit lamp is the only carrier of "speaking"; a name on it keeps the state readable
+    // without a live region announcing every turn of the conversation.
+    if (tile.lamp.hasAttribute("aria-label") !== speaking) {
+      if (speaking) {
+        tile.lamp.setAttribute("role", "img");
+        tile.lamp.setAttribute("aria-label", "speaking");
+      } else {
+        tile.lamp.removeAttribute("role");
+        tile.lamp.removeAttribute("aria-label");
+      }
+    }
     setText(tile.name, isLocal ? `${entry.name} (you)` : entry.name);
+    // Legend order from the design direction: name, role, source, then the state and the layer.
     const badges: Array<[string, string?]> = [];
     if (entry.role !== "attendee") badges.push([entry.role]);
+    for (const source of publishedSources(model, entry.participant_id)) badges.push([source]);
     if (entry.hand) badges.push(["hand up", "amber"]);
     if (entry.muted) badges.push(["mic off", "amber"]);
     if (!entry.connected) badges.push(["reconnecting", "amber"]);
