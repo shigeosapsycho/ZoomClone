@@ -1,0 +1,24 @@
+{
+  "name": "@zoomclone/tokens",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "gen-key": "tsx src/gen-key.ts"
+  },
+  "dependencies": {
+    "@zoomclone/protocol": "workspace:*",
+    "jose": "6.2.12"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.4",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}
