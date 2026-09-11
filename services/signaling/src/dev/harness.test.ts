@@ -10,7 +10,11 @@ describe("dev harness bundle", () => {
     expect(bundle.html).toContain('href="/dev/app.css"');
     expect(bundle.html).toContain("http://api.test:8080");
     expect(bundle.js.length).toBeGreaterThan(1000);
-    expect(bundle.js).not.toContain("require(");
+    // mediasoup-client brings CommonJS dependencies, so esbuild's `__commonJS` wrapper (whose
+    // inner function is named `__require`) is expected; a bare `require(` or a `__require("x")`
+    // call would mean a module the browser cannot load (the node:crypto import Task 1 removed).
+    expect(bundle.js).not.toMatch(/(?<![\w$])require\(/);
+    expect(bundle.js).not.toContain('__require("');
     expect(bundle.css).toContain("--desk");
   }, 30_000);
 
