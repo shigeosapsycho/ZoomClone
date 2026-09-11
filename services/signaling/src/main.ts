@@ -5,17 +5,14 @@ import { InMemoryEventBus } from "@zoomclone/events";
 import { createApp } from "./app";
 import { loadEnv } from "./env";
 import { remoteTokenVerifier } from "./gateway/auth";
+import { loggerOptions } from "./log";
 import { createMetrics } from "./metrics";
 import { RoomRegistry } from "./room/registry";
 import { SfuDirectory } from "./sfu/directory";
 import { PostgresWriter } from "./writer/postgres-writer";
 
 const env = loadEnv();
-const log = pino(
-  env.NODE_ENV === "development"
-    ? { level: env.LOG_LEVEL, transport: { target: "pino-pretty" } }
-    : { level: env.LOG_LEVEL },
-);
+const log = pino(loggerOptions(env));
 const db = createDb(env.DATABASE_URL);
 const redis = new Redis(env.REDIS_URL);
 const subscriber = new Redis(env.REDIS_URL);

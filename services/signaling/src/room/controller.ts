@@ -66,6 +66,15 @@ export type ControllerTimings = {
 
 export type ControllerMetrics = { resync(): void; replay(): void };
 
+/** Test-only seams (production never sets them). */
+export type ControllerHooks = {
+  /**
+   * Awaited after the SFU calls of a hello or an admit and before the room command is applied:
+   * stands in for a slow SFU so tests can close the controller inside that window.
+   */
+  beforeJoinApply?: () => Promise<void>;
+};
+
 export type ControllerDeps = {
   room: Room;
   sfu: Client<typeof SfuService>;
@@ -76,6 +85,7 @@ export type ControllerDeps = {
   log: Logger;
   timings: ControllerTimings;
   metrics?: ControllerMetrics;
+  hooks?: ControllerHooks;
   /** Called once the controller is gone (room ended or controller closed); the registry drops it. */
   onGone: (sessionId: string) => void;
 };
@@ -196,8 +206,7 @@ export class RoomController {
       return null;
     }
     if (this.gone) {
-      // 4004 is terminal for clients; a closed controller only means "come back" (registry rehydrate).
-      link.close(1012, "controller restarting");
+      this.refuseGone(link, hello.id);
       return null;
     }
     const departed = this.room.departed(pid);
@@ -229,8 +238,20 @@ export class RoomController {
     }
   }
 
-  private async resume(link: ParticipantLink, pid: string, hello: HelloPayload): Promise<string> {
+  private async resume(
+    link: ParticipantLink,
+    pid: string,
+    hello: HelloPayload,
+  ): Promise<string | null> {
     const { media, rebuilt } = await this.ensureTransports(pid);
+    await this.deps.hooks?.beforeJoinApply?.();
+    if (this.gone) {
+      // close() ran during the SFU calls: existing transports belong to the next owner's
+      // snapshot, but a pair created here would never reach anyone.
+      if (rebuilt) await this.closeTransports(pid);
+      this.refuseGone(link, hello.id);
+      return null;
+    }
     if (!this.room.inRoster(pid)) {
       await this.closeTransports(pid);
       const departed = this.room.departed(pid);
@@ -285,6 +306,14 @@ export class RoomController {
       return null;
     }
     const media = await this.createTransports(pid);
+    await this.deps.hooks?.beforeJoinApply?.();
+    if (this.gone) {
+      // close() ran during the SFU calls: the link never made it into this.links, so nothing
+      // else will close it, and the transports would outlive their only reference.
+      await this.closeTransports(pid);
+      this.refuseGone(link, helloId);
+      return null;
+    }
     const outcome = this.room.apply({
       type: "join",
       participant_id: pid,
@@ -317,6 +346,16 @@ export class RoomController {
       payload: { code: error.code, message: error.message },
     });
     link.close(error.close ?? 1008, error.message);
+  }
+
+  /** 4004 is terminal for clients; a closed controller only means "come back" (registry rehydrate). */
+  private refuseGone(link: ParticipantLink, helloId: string): void {
+    link.send({
+      type: "error",
+      id: helloId,
+      payload: { code: "CONTROLLER_BUSY", message: "controller restarting, retry" },
+    });
+    link.close(1012, "controller restarting");
   }
 
   private sendAck(link: ParticipantLink, id: string, mode: HelloAck["mode"]): void {
@@ -536,6 +575,10 @@ export class RoomController {
     const entry = this.requireJoined(pid);
     const send = this.bindings.transport(pid, "send");
     if (!send) throw new RoomFailure({ code: "NOT_FOUND", message: "no send transport" });
+    // One live track per (owner, source): a republish (new device, renegotiation) replaces the
+    // old one instead of leaking a producer the client no longer feeds.
+    for (const old of this.room.tracksOf(pid, payload.source))
+      await this.unpublish(pid, old.track_id);
     const sentPaused = this.effectivePaused(payload, entry);
     const res = await this.deps.sfu.publish({
       sessionId: this.sessionId,
@@ -764,13 +807,17 @@ export class RoomController {
         throw new RoomFailure({ code: "CAPACITY", message: "meeting is full" });
       }
       const media = await this.createTransports(target);
+      await this.deps.hooks?.beforeJoinApply?.();
+      if (this.gone) {
+        await this.discardTransports(media);
+        throw new RoomFailure({
+          code: "CONTROLLER_BUSY",
+          message: "controller restarting, retry",
+        });
+      }
       const outcome = this.room.apply({ type: "admit", actor, participant_id: target });
       if (!outcome.ok) {
-        // Undo exactly this call's transports; anything else the target owns is not ours to close.
-        for (const id of [media.send_transport.id, media.recv_transport.id]) {
-          await this.closeTransportQuietly(id);
-          this.bindings.removeTransport(id);
-        }
+        await this.discardTransports(media);
         throw new RoomFailure(outcome.error);
       }
       this.afterApply(outcome.events);
@@ -779,6 +826,14 @@ export class RoomController {
         ?.send({ type: "resync", payload: { ...this.room.welcomeFor(target), media } });
       this.audit(actor, "admit", target);
     });
+  }
+
+  /** Undo exactly one call's transports; anything else the participant owns is not ours to close. */
+  private async discardTransports(media: MediaParams): Promise<void> {
+    for (const id of [media.send_transport.id, media.recv_transport.id]) {
+      await this.closeTransportQuietly(id);
+      this.bindings.removeTransport(id);
+    }
   }
 
   private deny(actor: string, target: string): void {

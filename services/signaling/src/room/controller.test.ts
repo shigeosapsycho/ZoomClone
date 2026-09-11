@@ -16,6 +16,7 @@ import {
   type TestInfra,
 } from "../../test/helpers";
 import { roomKeys } from "./checkpoint";
+import type { ControllerHooks } from "./controller";
 import { Room } from "./room";
 
 const HOST = "11111111-1111-4111-8111-111111111111";
@@ -204,7 +205,79 @@ describe("RoomController: joining", () => {
       ),
     ).toBeNull();
     expect(link.closedWith).toEqual({ code: 1012, reason: "controller restarting" });
-    expect(link.sent).toEqual([]);
+    expect(link.sent).toEqual([
+      {
+        type: "error",
+        id: "h",
+        payload: { code: "CONTROLLER_BUSY", message: "controller restarting, retry" },
+      },
+    ]);
+  });
+
+  it("a hello whose controller closes while its transports are being created closes 1012 and leaves nothing behind", async () => {
+    const hooks: ControllerHooks = {};
+    const t = await createTestController({ infra, sfu, hooks });
+    live.push(t);
+    hooks.beforeJoinApply = () => t.controller.close();
+    const link = new FakeLink();
+    expect(
+      await t.controller.attach(
+        link,
+        mintClaims({ session_id: t.room.sessionId, participant_id: A }),
+        { id: "h" },
+      ),
+    ).toBeNull();
+    expect(link.ofType("error")[0]?.payload.code).toBe("CONTROLLER_BUSY");
+    expect(link.closedWith).toEqual({ code: 1012, reason: "controller restarting" });
+    expect(sfu.callsTo("closeTransport").map((c) => c.request["transportId"])).toEqual([
+      "t1",
+      "t2",
+    ]);
+    expect(t.room.inRoster(A)).toBe(false);
+    expect(t.controller.connectionCount).toBe(0);
+    expect(t.controller.isGone).toBe(true);
+  });
+
+  it("a resume whose controller closes while its transports are being rebuilt closes 1012 and drops the new transports", async () => {
+    const hooks: ControllerHooks = {};
+    const t = await createTestController({ infra, sfu, hooks });
+    live.push(t);
+    const S = t.room.sessionId;
+    const ann = await join(t, { participant_id: A });
+    await request(t, ann, A, "publish", {
+      kind: "audio",
+      source: "mic",
+      rtp_parameters: {},
+      paused: false,
+    });
+    sfu.emit(S, {
+      case: "transportClosed",
+      value: { transportId: "t1", participantId: A, reason: "dtls" },
+    });
+    // The producer close behind it proves both events were processed (track.removed reaches A).
+    sfu.emit(S, {
+      case: "producerClosed",
+      value: { producerId: "p1", trackId: "trk1", participantId: A },
+    });
+    await ann.waitFor("track.removed");
+    t.controller.detach(ann, A);
+    hooks.beforeJoinApply = () => t.controller.close();
+    const back = new FakeLink();
+    expect(
+      await t.controller.attach(back, mintClaims({ session_id: S, participant_id: A }), {
+        id: "re",
+      }),
+    ).toBeNull();
+    expect(back.ofType("error")[0]?.payload.code).toBe("CONTROLLER_BUSY");
+    expect(back.closedWith).toEqual({ code: 1012, reason: "controller restarting" });
+    expect(sfu.callsTo("createTransport")).toHaveLength(4);
+    // t2 went when the rebuild started; t3 and t4 are the pair the closed controller must not keep.
+    expect(sfu.callsTo("closeTransport").map((c) => c.request["transportId"])).toEqual([
+      "t2",
+      "t3",
+      "t4",
+    ]);
+    expect(t.controller.connectionCount).toBe(0);
   });
 });
 
@@ -283,6 +356,26 @@ describe("RoomController: lobby", () => {
     });
     expect(connect.type).toBe("ack");
     expect(sfu.callsTo("connectTransport")[0]?.request["transportId"]).toBe("t3");
+  });
+
+  it("an admit whose controller closes while its transports are being created fails CONTROLLER_BUSY and closes them", async () => {
+    const hooks: ControllerHooks = {};
+    const t = await createTestController({ infra, sfu, hooks });
+    live.push(t);
+    const host = await join(t, { participant_id: HOST, role: "host" });
+    const waiter = await join(t, { participant_id: W, lobby: true });
+    hooks.beforeJoinApply = () => t.controller.close();
+    const reply = await request(t, host, HOST, "host.admit", { participant_id: W });
+    expect(reply).toMatchObject({ type: "error", payload: { code: "CONTROLLER_BUSY" } });
+    expect(sfu.callsTo("closeTransport").map((c) => c.request["transportId"])).toEqual([
+      "t3",
+      "t4",
+    ]);
+    expect(t.room.inRoster(W)).toBe(false);
+    expect(t.room.inLobby(W)).toBe(true);
+    expect(waiter.ofType("resync")).toEqual([]);
+    expect(host.closedWith?.code).toBe(1012);
+    expect(waiter.closedWith?.code).toBe(1012);
   });
 
   it("an admit whose waiter is denied mid-flight fails NOT_FOUND and closes only the transports it created", async () => {
@@ -592,6 +685,27 @@ describe("RoomController: media", () => {
       track_id: "trk1",
       paused: true,
     });
+  });
+
+  it("publishing a source again replaces its live track: the old producer is unpublished and the others see removed then added", async () => {
+    const t = await startRoom();
+    const ann = await join(t, { participant_id: A });
+    const bob = await join(t, { participant_id: B });
+    const mic = { kind: "audio", source: "mic", rtp_parameters: {}, paused: false } as const;
+    expect(await request(t, ann, A, "publish", mic)).toMatchObject({
+      type: "ack",
+      payload: { track_id: "trk1" },
+    });
+    expect(await request(t, ann, A, "publish", mic)).toMatchObject({
+      type: "ack",
+      payload: { track_id: "trk2" },
+    });
+    expect(sfu.callsTo("unpublish").map((c) => c.request["producerId"])).toEqual(["p1"]);
+    expect(sfu.room(t.room.sessionId)?.producers.size).toBe(1);
+    expect(t.room.tracksOf(A, "mic").map((x) => x.track_id)).toEqual(["trk2"]);
+    expect(bob.sent.slice(-2).map((m) => m.type)).toEqual(["track.removed", "track.added"]);
+    expect(bob.ofType("track.removed")[0]?.payload).toEqual({ track_id: "trk1" });
+    expect(bob.ofType("track.added").at(-1)?.payload.track.track_id).toBe("trk2");
   });
 });
 

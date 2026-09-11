@@ -23,7 +23,11 @@ import { localTokenVerifier } from "../src/gateway/auth";
 import type { ParticipantLink } from "../src/gateway/link";
 import { createMetrics } from "../src/metrics";
 import { Checkpoint, OwnerLease } from "../src/room/checkpoint";
-import { RoomController, type ControllerTimings } from "../src/room/controller";
+import {
+  RoomController,
+  type ControllerHooks,
+  type ControllerTimings,
+} from "../src/room/controller";
 import { RoomRegistry, type RegistryTimings } from "../src/room/registry";
 import { DEFAULT_ROOM_OPTIONS, Room } from "../src/room/room";
 import { SfuDirectory } from "../src/sfu/directory";
@@ -197,6 +201,7 @@ export async function createTestController(opts: {
   sessionId?: string;
   room?: Room;
   timings?: Partial<ControllerTimings>;
+  hooks?: ControllerHooks;
 }): Promise<TestController> {
   const { env, redis, db, bus } = opts.infra;
   const sessionId = opts.room?.sessionId ?? opts.sessionId ?? randomUUID();
@@ -230,6 +235,7 @@ export async function createTestController(opts: {
       statsRetryMs: 50,
       ...opts.timings,
     },
+    hooks: opts.hooks,
     onGone: resolveGone,
   });
   await controller.start();
