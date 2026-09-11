@@ -22,7 +22,12 @@ export type App = FastifyInstance;
 
 export async function buildApp(deps: AppDeps): Promise<App> {
   const app = Fastify({
-    logger: deps.env.NODE_ENV === "test" ? false : { level: deps.env.LOG_LEVEL },
+    logger:
+      deps.env.NODE_ENV === "test"
+        ? false
+        : deps.env.NODE_ENV === "development"
+          ? { level: deps.env.LOG_LEVEL, transport: { target: "pino-pretty" } }
+          : { level: deps.env.LOG_LEVEL },
   });
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);

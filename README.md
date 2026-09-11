@@ -21,3 +21,32 @@ pnpm check                 # typecheck + prettier + unit/integration tests (need
 ```
 
 Design: `docs/superpowers/specs/2026-09-10-video-meeting-mvp-design.md`.
+
+## Meeting API (port 8080)
+
+| Method | Path                     | Auth                                   |
+| ------ | ------------------------ | -------------------------------------- |
+| POST   | `/v1/meetings`           | bearer                                 |
+| GET    | `/v1/meetings/{id}`      | bearer (same org)                      |
+| PATCH  | `/v1/meetings/{id}`      | organizer                              |
+| DELETE | `/v1/meetings/{id}`      | organizer                              |
+| POST   | `/v1/meetings/{id}:end`  | organizer                              |
+| POST   | `/v1/join`               | optional bearer (guests allowed)       |
+| GET    | `/v1/me`                 | bearer                                 |
+| GET    | `/.well-known/jwks.json` | none                                   |
+| POST   | `/dev/oidc/token`        | none, only with `AUTH_DEV_ISSUER=true` |
+
+Errors: `{ "error": { "code": "...", "message": "..." } }` with spec 5.1 codes
+(`MEETING_NOT_FOUND`, `LOCKED`, `ENDED`, `CAPACITY`, `NO_CAPACITY`, `RATE_LIMITED`, ...).
+
+Smoke test with the dev issuer:
+
+```sh
+TOKEN=$(curl -s -X POST localhost:8080/dev/oidc/token -H 'content-type: application/json' -d '{"name":"Host"}' \
+  | node -e 'process.stdin.on("data",d=>console.log(JSON.parse(d).access_token))')
+CODE=$(curl -s -X POST localhost:8080/v1/meetings -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"title":"Smoke"}' \
+  | node -e 'process.stdin.on("data",d=>console.log(JSON.parse(d).code))')
+curl -s -X POST localhost:8080/v1/join -H 'content-type: application/json' \
+  -d "{\"code\":\"$CODE\",\"display_name\":\"Guest\"}"
+```
