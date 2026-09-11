@@ -67,7 +67,7 @@ ZoomClone/
   packages/
     protocol/    zod schemas for WS envelope + every message, REST DTOs, error codes, JWT claims,
                  meeting code generator/validator, WS close codes. Shared by all services + harness.
-    db/          Drizzle schema (spec 4.1 tables in use), SQL migrations, pg client factory,
+    db/          SQL migrations (spec 4.1 tables in use), postgres.js client factory,
                  migrate script, `endSession(session_id, reason, peak)` (idempotent, shared)
     events/      EventBus interface, event envelope, typed events, InMemoryEventBus
     sfu-proto/   generated TS from proto (committed output)
@@ -90,7 +90,7 @@ Postgres 5432, Redis 6379.
 
 ## Data model
 
-Postgres (Drizzle, mirrors spec 4.1, only tables the slice writes): `meetings`, `meeting_sessions`,
+Postgres (hand-written SQL migrations applied by a small runner, queried through postgres.js; only tables the slice writes): `meetings`, `meeting_sessions`,
 `participants`. Addition to spec: `CREATE UNIQUE INDEX ON meeting_sessions (meeting_id) WHERE ended_at
 IS NULL` so get-or-create of the live session is idempotent under join storms. `recordings` and
 `chat_messages` arrive with their slices.
@@ -281,7 +281,7 @@ connected or wrong direction `FAILED_PRECONDITION`; mediasoup errors `INTERNAL` 
   DEFAULT_REGION, DEFAULT_ORG_ID, SFU_ID, SIGNALING_PUBLIC_URL, STUN_URLS, TURN_URLS, TURN_SECRET.
 - `auth/`: `verifyUser(bearer)`, `signSignalingToken(claims)`, `jwks()`, `devIssuer` plugin.
 - `scheduler.ts`: `Scheduler` interface `{place(meeting): Promise<Placement>}`, `StaticScheduler`.
-- `meetings/`: repository (Drizzle) + service (code gen, session get-or-create tx, status
+- `meetings/`: repository (postgres.js SQL) + service (code gen, session get-or-create tx, status
   transitions, `:end` via `endSession`) + routes. `join/`: rate limiter interface + in-memory
   impl, join service, route.
 - `roomState.ts`: read-only Redis reader for `{room:S}:meta` and roster size.

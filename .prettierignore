@@ -1,0 +1,8 @@
+node_modules
+pnpm-lock.yaml
+docs/
+*.pdf
+packages/sfu-proto/src/gen/
+services/signaling/public/
+e2e/test-results/
+e2e/playwright-report/
