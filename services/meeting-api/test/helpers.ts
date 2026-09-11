@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import Redis from "ioredis";
 import { createDb, type Db } from "@zoomclone/db";
 import { ensureTestDatabase, testDatabaseUrl, truncateAll } from "@zoomclone/db/testing";
@@ -75,4 +76,18 @@ export async function createTestContext(
       await db.end();
     },
   };
+}
+
+/** Simulates what /join does when a meeting goes live: one session row, meeting status live. */
+export async function startSession(
+  db: Db,
+  meetingId: string,
+  sfuId = "sfu-local-1",
+): Promise<string> {
+  const sessionId = randomUUID();
+  await db`
+    INSERT INTO meeting_sessions (id, meeting_id, started_at, home_sfu_id)
+    VALUES (${sessionId}, ${meetingId}, now(), ${sfuId})`;
+  await db`UPDATE meetings SET status = 'live' WHERE id = ${meetingId}`;
+  return sessionId;
 }

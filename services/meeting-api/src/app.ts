@@ -9,6 +9,7 @@ import { registerAuthHook } from "./auth/hooks";
 import { authRoutes } from "./auth/routes";
 import type { AppDeps } from "./deps";
 import { errorHandler, notFoundHandler } from "./error-handler";
+import { meetingRoutes } from "./meetings/routes";
 
 declare module "fastify" {
   interface FastifyInstance {
@@ -38,6 +39,7 @@ export async function buildApp(deps: AppDeps): Promise<App> {
       defaultOrgId: deps.env.DEFAULT_ORG_ID,
     });
   }
+  await app.register(meetingRoutes, { prefix: "/v1" });
 
   const r = app.withTypeProvider<ZodTypeProvider>();
   r.get("/healthz", async () => ({ ok: true }));
