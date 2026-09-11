@@ -4,6 +4,7 @@ docs/
 *.pdf
 packages/sfu-proto/src/gen/
 services/signaling/public/
+e2e/.cache/
 e2e/test-results/
 e2e/playwright-report/
 .superpowers/
