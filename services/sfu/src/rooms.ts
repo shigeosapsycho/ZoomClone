@@ -234,7 +234,14 @@ export class Room {
     );
     producer.on("transportclose", () => this.dropProducer(producer.id));
     if (kind === "audio") {
-      await guarded(() => this.audioLevelObserver.addProducer({ producerId: producer.id }));
+      try {
+        await guarded(() => this.audioLevelObserver.addProducer({ producerId: producer.id }));
+      } catch (error) {
+        // Roll back: the caller never learned this producer's id, so leave no trace and no event.
+        producer.close();
+        this.producers.delete(producer.id);
+        throw error;
+      }
     }
     return { producerId: producer.id, trackId, layerCount };
   }
@@ -274,7 +281,8 @@ export class Room {
         appData: { participantId, producerId },
       }),
     );
-    if (priority !== undefined) await guarded(() => consumer.setPriority(priority));
+    // Register and wire the consumer before setPriority so a rejection below has something to
+    // roll back cleanly, rather than leaving a mediasoup consumer alive but untracked.
     this.consumers.set(consumer.id, { consumer, participantId, transportId, producerId });
     consumer.on("layerschange", (layers) =>
       this.emit({
@@ -287,6 +295,16 @@ export class Room {
     );
     consumer.on("producerclose", () => this.dropConsumer(consumer.id, "producerclose"));
     consumer.on("transportclose", () => this.dropConsumer(consumer.id, "transportclose"));
+    if (priority !== undefined) {
+      try {
+        await guarded(() => consumer.setPriority(priority));
+      } catch (error) {
+        // Roll back: the caller never learned this consumer's id, so leave no trace and no event.
+        consumer.close();
+        this.consumers.delete(consumer.id);
+        throw error;
+      }
+    }
     return {
       consumerId: consumer.id,
       kind: consumer.kind,
@@ -329,7 +347,7 @@ export class Room {
     return entry;
   }
 
-  private requireOwnedTransport(
+  requireOwnedTransport(
     transportId: string,
     participantId: string,
     direction: Direction,
@@ -567,34 +585,20 @@ export class RoomManager {
     priority?: number,
   ): Promise<SubscribeResult> {
     const room = this.require(sessionId);
-    // Call room.subscribe first so its own transport ownership/direction checks take priority
-    // over the cross-room reclassification below (a wrong-direction transport must still fail
-    // FAILED_PRECONDITION even when the producer id also belongs to another room).
-    try {
-      return await room.subscribe(
-        participantId,
-        transportId,
-        producerId,
-        rtpCapabilities,
-        maxSpatialLayer,
-        priority,
-      );
-    } catch (error) {
-      // Only reclassify the producer-specific NOT_FOUND from requireProducer (message contains
-      // producerId); a transport-lookup NOT_FOUND never does, so it always passes through as-is.
-      const isUnknownProducer =
-        error instanceof SfuError &&
-        error.code === "NOT_FOUND" &&
-        error.message.includes(producerId);
-      if (
-        isUnknownProducer &&
-        !room.producers.has(producerId) &&
-        this.findRoomByProducer(producerId)
-      ) {
-        throw new SfuError("PERMISSION_DENIED", "producer belongs to another room");
-      }
-      throw error;
+    // Check transport ownership/direction first so a wrong-direction transport still fails
+    // FAILED_PRECONDITION even when the producer id also belongs to another room.
+    room.requireOwnedTransport(transportId, participantId, "recv");
+    if (!room.producers.has(producerId) && this.findRoomByProducer(producerId)) {
+      throw new SfuError("PERMISSION_DENIED", "producer belongs to another room");
     }
+    return room.subscribe(
+      participantId,
+      transportId,
+      producerId,
+      rtpCapabilities,
+      maxSpatialLayer,
+      priority,
+    );
   }
 
   async closeAll(): Promise<void> {

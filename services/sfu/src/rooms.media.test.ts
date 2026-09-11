@@ -179,3 +179,33 @@ describe("subscribe", () => {
     expect(room.consumers.has(sub.consumerId)).toBe(false);
   });
 });
+
+describe("rollback", () => {
+  it("rolls back a producer when the audio level observer rejects it", async () => {
+    const failRoom = await manager.allocate("media-rollback-producer");
+    const send = (await failRoom.createTransport("A", "send")).transportId;
+    failRoom.audioLevelObserver.close();
+    await expect(
+      failRoom.publish("A", send, "audio", "mic", audioRtpParameters(), false),
+    ).rejects.toMatchObject({ code: expect.any(String) });
+    expect(failRoom.producers.size).toBe(0);
+    expect(failRoom.snapshot().producers).toEqual([]);
+    await manager.close("media-rollback-producer");
+  });
+
+  it("rolls back a consumer when the priority is invalid", async () => {
+    const pub = await room.publish(
+      "A",
+      sendA,
+      "video",
+      "camera",
+      videoSimulcastRtpParameters(),
+      false,
+    );
+    const sizeBefore = room.consumers.size;
+    await expect(
+      room.subscribe("B", recvB, pub.producerId, room.router.rtpCapabilities, undefined, 0),
+    ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    expect(room.consumers.size).toBe(sizeBefore);
+  });
+});
