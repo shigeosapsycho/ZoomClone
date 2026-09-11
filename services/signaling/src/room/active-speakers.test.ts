@@ -48,26 +48,21 @@ describe("ActiveSpeakerTracker", () => {
 
   it("emits at most once per minIntervalMs and flushes the pending change on the next tick", () => {
     const { t, emitted } = tracker();
+    const both = [
+      { participant_id: A, volume: -20 },
+      { participant_id: B, volume: -30 },
+    ];
     t.onSample([{ participant_id: A, volume: -20 }], 0);
-    t.onSample(
-      [
-        { participant_id: A, volume: -20 },
-        { participant_id: B, volume: -30 },
-      ],
-      300,
-    );
+    t.onSample(both, 100);
+    t.onSample(both, 300);
+    // A rose at 300 (seen since 0) and was emitted; B has only been seen since 100.
     expect(emitted).toEqual([[A]]);
-    t.onSample(
-      [
-        { participant_id: A, volume: -20 },
-        { participant_id: B, volume: -30 },
-      ],
-      500,
-    );
+    t.onSample(both, 400);
+    // B rose at 400, but the last emit was at 300: the change waits for the interval.
+    expect(t.current).toEqual([A, B]);
     expect(emitted).toEqual([[A]]);
-    // B's firstSeen is 300 (its first sample) and now is 500, so only 200ms of consecutive
-    // presence has elapsed, short of riseMs (300ms). B has not risen yet: current is still [A].
-    expect(t.current).toEqual([A]);
+    t.tick(500);
+    expect(emitted).toEqual([[A]]);
     t.tick(600);
     expect(emitted).toEqual([[A], [A, B]]);
   });
