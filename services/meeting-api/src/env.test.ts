@@ -13,6 +13,7 @@ describe("loadEnv", () => {
     expect(env.TURN_URLS).toEqual([]);
     expect(env.DEFAULT_ORG_ID).toBe("11111111-1111-4111-8111-111111111111");
     expect(env.JOIN_RATE_LIMIT).toBe(10);
+    expect(env.JOIN_RATE_LIMIT_PER_CODE).toBe(120);
     expect(env.JOIN_RATE_WINDOW_MS).toBe(60_000);
     expect(env.OIDC_ALGORITHMS).toEqual(["RS256", "ES256"]);
 

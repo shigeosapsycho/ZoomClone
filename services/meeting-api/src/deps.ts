@@ -57,7 +57,7 @@ export function createDeps(env: Env, infra: Infra): AppDeps {
   const clock = infra.clock ?? (() => new Date());
   const limiters = {
     ip: new SlidingWindowLimiter(env.JOIN_RATE_LIMIT, env.JOIN_RATE_WINDOW_MS),
-    code: new SlidingWindowLimiter(env.JOIN_RATE_LIMIT, env.JOIN_RATE_WINDOW_MS),
+    code: new SlidingWindowLimiter(env.JOIN_RATE_LIMIT_PER_CODE, env.JOIN_RATE_WINDOW_MS),
   };
   const join = new JoinService({
     db: infra.db,

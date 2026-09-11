@@ -132,8 +132,9 @@ reuses a dying session. Pub/sub channel `room:{session_id}:ctl` carries control 
 
 Recordings endpoints: deferred to slice E (not stubbed).
 
-`POST /join` flow: rate limit per IP and per code (10/min, in-memory limiter behind an interface)
--> 429 `RATE_LIMITED`; lookup by code -> 404 `MEETING_NOT_FOUND`; ended/cancelled -> 410 `ENDED`;
+`POST /join` flow: rate limit per IP (10/min, spec) and per code (120/min default, separate
+`JOIN_RATE_LIMIT_PER_CODE`; the spec's 10/min per code would cap a meeting at ten joins a minute),
+in-memory limiter behind an interface -> 429 `RATE_LIMITED`; lookup by code -> 404 `MEETING_NOT_FOUND`; ended/cancelled -> 410 `ENDED`;
 role = bearer.sub == organizer_id ? `host` : `attendee`; get-or-create live session in one
 transaction (on create: `StaticScheduler.place()` -> region, sfu id, signaling url; write
 `home_sfu_id`; meeting -> `live`); if session existed read Redis meta: `status == ended` ->

@@ -210,7 +210,10 @@ describe("POST /v1/join", () => {
   });
 
   it("rate limits per IP and per code with retry-after, and counts errors", async () => {
-    const limited = await createTestContext({ JOIN_RATE_LIMIT: "3" });
+    const limited = await createTestContext({
+      JOIN_RATE_LIMIT: "3",
+      JOIN_RATE_LIMIT_PER_CODE: "3",
+    });
     try {
       for (let i = 0; i < 3; i++) {
         expect((await join("zzz-zzzz-zzz", { app: limited.app })).statusCode).toBe(404);

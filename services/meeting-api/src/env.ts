@@ -46,6 +46,9 @@ export const EnvSchema = z
     TURN_SECRET: z.string().optional(),
     TURN_TTL_SECONDS: z.coerce.number().int().default(3600),
     JOIN_RATE_LIMIT: z.coerce.number().int().default(10),
+    // The spec's 10/min protects against code guessing per IP; per code the limit only needs to
+    // stop a flood against one meeting, so it is much higher.
+    JOIN_RATE_LIMIT_PER_CODE: z.coerce.number().int().default(120),
     JOIN_RATE_WINDOW_MS: z.coerce.number().int().default(60_000),
   })
   .superRefine((env, ctx) => {

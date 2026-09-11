@@ -22,6 +22,7 @@ export function testEnv(overrides: Record<string, string> = {}): Env {
     TURN_URLS: "turn:turn.example.com:443?transport=tcp",
     TURN_SECRET: "turn-secret",
     JOIN_RATE_LIMIT: "1000",
+    JOIN_RATE_LIMIT_PER_CODE: "1000",
     ...overrides,
   });
 }
