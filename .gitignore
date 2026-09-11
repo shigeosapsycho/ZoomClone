@@ -11,3 +11,5 @@ Thumbs.db
 e2e/test-results/
 e2e/playwright-report/
 services/signaling/public/dev/*.js
+.superpowers/
+.impeccable/
