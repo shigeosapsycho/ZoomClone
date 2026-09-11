@@ -38,4 +38,12 @@ describe("signaling env", () => {
   it("requires the database and redis urls", () => {
     expect(() => loadEnv({ REDIS_URL: "redis://x" })).toThrow();
   });
+
+  it("refuses the dev harness in production", () => {
+    expect(loadEnv({ ...base, DEV_HARNESS: "true" }).DEV_HARNESS).toBe(true);
+    expect(loadEnv({ ...base, NODE_ENV: "production" }).DEV_HARNESS).toBe(false);
+    expect(() => loadEnv({ ...base, NODE_ENV: "production", DEV_HARNESS: "true" })).toThrow(
+      /DEV_HARNESS must be false in production/,
+    );
+  });
 });

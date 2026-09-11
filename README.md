@@ -99,14 +99,17 @@ Verify the JWT issuer: `TOKEN_ISSUER` must match meeting-api's value (default `m
 With `DEV_HARNESS=true` the signaling service serves the browser client at
 `http://localhost:8081/dev/`: a broadcast-gallery view of the room (monitor tiles with tally lamps
 and audio meters, the green room, talk, the control strip, and a tape of the signaling events).
+It is a dev page: the service refuses `DEV_HARNESS=true` under `NODE_ENV=production`.
 Create a meeting with a dev host token, then join from two browser windows with the room code:
 
 ```sh
 pnpm dev                                                    # all three services
 TOKEN=$(curl -s -X POST localhost:8080/dev/oidc/token -H 'content-type: application/json' \
-  -d '{"sub":"11111111-1111-4111-8111-111111111111","name":"Host"}' | jq -r .access_token)
+  -d '{"sub":"11111111-1111-4111-8111-111111111111","name":"Host"}' \
+  | node -e 'process.stdin.on("data",d=>console.log(JSON.parse(d).access_token))')
 curl -s -X POST localhost:8080/v1/meetings -H "authorization: Bearer $TOKEN" \
-  -H 'content-type: application/json' -d '{"title":"hello"}' | jq .code
+  -H 'content-type: application/json' -d '{"title":"hello"}' \
+  | node -e 'process.stdin.on("data",d=>console.log(JSON.parse(d).code))'
 ```
 
 Paste the token into "host token" on the join screen to join as the host (the green room, mute,
