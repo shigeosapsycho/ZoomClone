@@ -1,16 +1,27 @@
 import { randomUUID } from "node:crypto";
+import type { AddressInfo } from "node:net";
 import { createClient } from "@connectrpc/connect";
 import { createGrpcTransport } from "@connectrpc/connect-node";
 import Redis from "ioredis";
 import pino from "pino";
+import { WebSocket } from "ws";
 import { createDb, type Db } from "@zoomclone/db";
 import { ensureTestDatabase, testDatabaseUrl, truncateAll } from "@zoomclone/db/testing";
 import { InMemoryEventBus } from "@zoomclone/events";
-import { ServerMessageSchema, type ServerMessage, type SignalingClaims } from "@zoomclone/protocol";
+import {
+  ServerMessageSchema,
+  type ClientMessage,
+  type RoomEvent,
+  type ServerMessage,
+  type SignalingClaims,
+} from "@zoomclone/protocol";
 import { SfuService } from "@zoomclone/sfu-proto";
-import { loadSigningKeys, type SigningKeys } from "@zoomclone/tokens";
+import { loadSigningKeys, signSignalingToken, type SigningKeys } from "@zoomclone/tokens";
+import { createApp } from "../src/app";
 import { loadEnv, type Env } from "../src/env";
+import { localTokenVerifier } from "../src/gateway/auth";
 import type { ParticipantLink } from "../src/gateway/link";
+import { createMetrics } from "../src/metrics";
 import { Checkpoint, OwnerLease } from "../src/room/checkpoint";
 import { RoomController, type ControllerTimings } from "../src/room/controller";
 import { RoomRegistry, type RegistryTimings } from "../src/room/registry";
@@ -250,4 +261,141 @@ export function createTestRegistry(
     },
     roomOptions: DEFAULT_ROOM_OPTIONS,
   });
+}
+
+export const TEST_ISSUER = "meeting-api";
+
+export function mintToken(infra: TestInfra, claims: SignalingClaims): Promise<string> {
+  return signSignalingToken(infra.keys, TEST_ISSUER, claims);
+}
+
+type Reply = Extract<ServerMessage, { type: "ack" | "error" }>;
+
+/** Minimal signaling client over a real socket; every received frame must satisfy ServerMessageSchema. */
+export class TestClient {
+  readonly received: ServerMessage[] = [];
+  closeEvent: { code: number; reason: string } | null = null;
+  private counter = 0;
+
+  private constructor(private readonly ws: WebSocket) {
+    ws.on("message", (data) => {
+      this.received.push(ServerMessageSchema.parse(JSON.parse(data.toString())));
+    });
+    ws.on("close", (code, reason) => {
+      this.closeEvent = { code, reason: reason.toString() };
+    });
+    ws.on("error", () => undefined);
+  }
+
+  static connect(url: string): Promise<TestClient> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url);
+      const client = new TestClient(ws);
+      ws.once("open", () => resolve(client));
+      ws.once("error", reject);
+      ws.once("unexpected-response", (_req, res) =>
+        reject(new Error(`upgrade failed: ${res.statusCode}`)),
+      );
+    });
+  }
+
+  sendRaw(text: string): void {
+    this.ws.send(text);
+  }
+
+  send(message: ClientMessage): void {
+    this.ws.send(JSON.stringify(message));
+  }
+
+  /** Sends a request and resolves with its ack or error frame. */
+  async request<T extends ClientMessage["type"]>(
+    type: T,
+    payload: Extract<ClientMessage, { type: T }>["payload"],
+    timeoutMs = 2000,
+  ): Promise<Reply> {
+    const id = `${type}-${++this.counter}`;
+    this.send({ type, id, payload } as ClientMessage);
+    const reply = await waitFor(
+      () =>
+        this.received.find(
+          (m): m is Reply => (m.type === "ack" || m.type === "error") && m.id === id,
+        ),
+      timeoutMs,
+    );
+    if (!reply)
+      throw new Error(`no reply to ${type} (${id}); closed=${JSON.stringify(this.closeEvent)}`);
+    return reply;
+  }
+
+  ofType<T extends ServerMessage["type"]>(type: T): Extract<ServerMessage, { type: T }>[] {
+    return this.received.filter((m): m is Extract<ServerMessage, { type: T }> => m.type === type);
+  }
+
+  events(): RoomEvent[] {
+    return this.received.filter((m): m is RoomEvent => "seq" in m);
+  }
+
+  async waitFor<T extends ServerMessage["type"]>(
+    type: T,
+    predicate: (m: Extract<ServerMessage, { type: T }>) => boolean = () => true,
+    timeoutMs = 2000,
+  ): Promise<Extract<ServerMessage, { type: T }>> {
+    const found = await waitFor(() => this.ofType(type).find(predicate), timeoutMs);
+    if (!found)
+      throw new Error(
+        `no ${type} within ${timeoutMs} ms; got ${this.received.map((m) => m.type).join(",")}`,
+      );
+    return found;
+  }
+
+  async waitForClose(timeoutMs = 2000): Promise<{ code: number; reason: string }> {
+    const closed = await waitFor(() => this.closeEvent, timeoutMs);
+    if (!closed) throw new Error("socket still open");
+    return closed;
+  }
+
+  close(): void {
+    this.ws.close(1000);
+  }
+
+  /** Drops the TCP connection without a close frame (a crashed client or lost network). */
+  terminate(): void {
+    this.ws.terminate();
+  }
+}
+
+export type TestSignaling = {
+  url: string;
+  httpUrl: string;
+  registry: RoomRegistry;
+  close: () => Promise<void>;
+};
+
+export async function startTestSignaling(
+  infra: TestInfra,
+  sfuBaseUrl: string,
+  opts: { timings?: Partial<RegistryTimings>; env?: Partial<Env> } = {},
+): Promise<TestSignaling> {
+  const registry = createTestRegistry(infra, sfuBaseUrl, opts.timings ?? {});
+  const metrics = createMetrics(() => registry.size);
+  const { server, wss } = createApp({
+    registry,
+    verifier: localTokenVerifier(infra.keys, TEST_ISSUER),
+    env: { ...infra.env, ...opts.env },
+    log: silentLog,
+    metrics,
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    url: `ws://127.0.0.1:${port}`,
+    httpUrl: `http://127.0.0.1:${port}`,
+    registry,
+    close: async () => {
+      await registry.closeAll();
+      for (const client of wss.clients) client.terminate();
+      wss.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
 }
