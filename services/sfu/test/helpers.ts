@@ -43,43 +43,65 @@ export const CLIENT_DTLS_PARAMETERS: ms.DtlsParameters = {
   ],
 };
 
-export const AUDIO_RTP_PARAMETERS: ms.RtpParameters = {
-  mid: "0",
-  codecs: [
-    {
-      mimeType: "audio/opus",
-      payloadType: 111,
-      clockRate: 48000,
-      channels: 2,
-      parameters: { useinbandfec: 1 },
-    },
-  ],
-  headerExtensions: [],
-  encodings: [{ ssrc: 11111111 }],
-  rtcp: { cname: "test-audio", reducedSize: true },
-};
+/**
+ * Fresh SSRCs per call so tests that share one long-lived transport across many `publish()`
+ * calls never collide in mediasoup's per-transport RTP listener (real worker-enforced
+ * uniqueness, not something the SFU implementation can or should paper over).
+ */
+let nextSsrc = 10_000_000;
 
-export const VIDEO_SIMULCAST_RTP_PARAMETERS: ms.RtpParameters = {
-  mid: "1",
-  codecs: [
-    {
-      mimeType: "video/VP8",
-      payloadType: 96,
-      clockRate: 90000,
-      rtcpFeedback: [
-        { type: "nack" },
-        { type: "nack", parameter: "pli" },
-        { type: "ccm", parameter: "fir" },
-        { type: "goog-remb" },
-      ],
-    },
-    { mimeType: "video/rtx", payloadType: 97, clockRate: 90000, parameters: { apt: 96 } },
-  ],
-  headerExtensions: [],
-  encodings: [
-    { ssrc: 22222222, rtx: { ssrc: 22222223 }, scalabilityMode: "L1T3", maxBitrate: 150_000 },
-    { ssrc: 22222224, rtx: { ssrc: 22222225 }, scalabilityMode: "L1T3", maxBitrate: 500_000 },
-    { ssrc: 22222226, rtx: { ssrc: 22222227 }, scalabilityMode: "L1T3", maxBitrate: 1_500_000 },
-  ],
-  rtcp: { cname: "test-video", reducedSize: true },
-};
+function takeSsrcs(count: number): number[] {
+  const base = nextSsrc;
+  nextSsrc += 10;
+  return Array.from({ length: count }, (_, i) => base + i);
+}
+
+export function audioRtpParameters(): ms.RtpParameters {
+  const ssrc = takeSsrcs(1)[0]!;
+  return {
+    // mid must be as fresh as the ssrc: mediasoup's per-transport RTP listener also rejects a
+    // second live producer with a mid it has already seen, same as it does for ssrc, so a fixed
+    // "0" would reintroduce the exact collision the ssrc factory exists to avoid.
+    mid: String(ssrc),
+    codecs: [
+      {
+        mimeType: "audio/opus",
+        payloadType: 111,
+        clockRate: 48000,
+        channels: 2,
+        parameters: { useinbandfec: 1 },
+      },
+    ],
+    headerExtensions: [],
+    encodings: [{ ssrc }],
+    rtcp: { cname: "test-audio", reducedSize: true },
+  };
+}
+
+export function videoSimulcastRtpParameters(): ms.RtpParameters {
+  const [a, b, c, d, e, f] = takeSsrcs(6);
+  return {
+    mid: String(a), // see audioRtpParameters: mid collides per-transport in mediasoup too
+    codecs: [
+      {
+        mimeType: "video/VP8",
+        payloadType: 96,
+        clockRate: 90000,
+        rtcpFeedback: [
+          { type: "nack" },
+          { type: "nack", parameter: "pli" },
+          { type: "ccm", parameter: "fir" },
+          { type: "goog-remb" },
+        ],
+      },
+      { mimeType: "video/rtx", payloadType: 97, clockRate: 90000, parameters: { apt: 96 } },
+    ],
+    headerExtensions: [],
+    encodings: [
+      { ssrc: a!, rtx: { ssrc: b! }, scalabilityMode: "L1T3", maxBitrate: 150_000 },
+      { ssrc: c!, rtx: { ssrc: d! }, scalabilityMode: "L1T3", maxBitrate: 500_000 },
+      { ssrc: e!, rtx: { ssrc: f! }, scalabilityMode: "L1T3", maxBitrate: 1_500_000 },
+    ],
+    rtcp: { cname: "test-video", reducedSize: true },
+  };
+}

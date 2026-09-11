@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { types as ms } from "mediasoup";
 import { MEDIA_CODECS } from "./codecs";
 import type { Env } from "./env";
@@ -43,6 +44,14 @@ export type TransportParams = {
   iceParameters: ms.IceParameters;
   iceCandidates: ms.IceCandidate[];
   dtlsParameters: ms.DtlsParameters;
+};
+
+export type PublishResult = { producerId: string; trackId: string; layerCount: number };
+export type SubscribeResult = {
+  consumerId: string;
+  kind: Kind;
+  rtpParameters: ms.RtpParameters;
+  producerPaused: boolean;
 };
 
 export type RoomSnapshot = {
@@ -189,7 +198,171 @@ export class Room {
     });
   }
 
-  // ---- media (Task 3 adds publish/subscribe methods here) ----
+  // ---- media ----
+
+  async publish(
+    participantId: string,
+    transportId: string,
+    kind: Kind,
+    source: Source,
+    rtpParameters: ms.RtpParameters,
+    paused: boolean,
+  ): Promise<PublishResult> {
+    this.assertOpen();
+    const entry = this.requireOwnedTransport(transportId, participantId, "send");
+    const trackId = randomUUID();
+    const meta: EntityMeta = {
+      sfuId: this.options.sfuId,
+      sessionId: this.sessionId,
+      participantId,
+      trackId,
+      kind,
+      source,
+      origin: "local",
+    };
+    const producer = await guarded(() =>
+      entry.transport.produce({ kind, rtpParameters, paused, appData: { ...meta } }),
+    );
+    const layerCount = rtpParameters.encodings?.length ?? 1;
+    this.producers.set(producer.id, { producer, meta, transportId, layerCount });
+    producer.on("score", (scores) =>
+      this.emit({
+        type: "producer_score",
+        producerId: producer.id,
+        score: scores.length ? Math.min(...scores.map((s) => s.score)) : 0,
+      }),
+    );
+    producer.on("transportclose", () => this.dropProducer(producer.id));
+    if (kind === "audio") {
+      await guarded(() => this.audioLevelObserver.addProducer({ producerId: producer.id }));
+    }
+    return { producerId: producer.id, trackId, layerCount };
+  }
+
+  async unpublish(producerId: string): Promise<void> {
+    const entry = this.requireProducer(producerId);
+    entry.producer.close();
+    this.dropProducer(producerId);
+  }
+
+  async setProducerPaused(producerId: string, paused: boolean): Promise<void> {
+    const entry = this.requireProducer(producerId);
+    await guarded(() => (paused ? entry.producer.pause() : entry.producer.resume()));
+  }
+
+  async subscribe(
+    participantId: string,
+    transportId: string,
+    producerId: string,
+    rtpCapabilities: ms.RtpCapabilities,
+    maxSpatialLayer?: number,
+    priority?: number,
+  ): Promise<SubscribeResult> {
+    this.assertOpen();
+    const entry = this.requireOwnedTransport(transportId, participantId, "recv");
+    this.requireProducer(producerId);
+    if (!this.router.canConsume({ producerId, rtpCapabilities })) {
+      throw new SfuError("FAILED_PRECONDITION", "rtp capabilities cannot consume this producer");
+    }
+    const consumer = await guarded(() =>
+      entry.transport.consume({
+        producerId,
+        rtpCapabilities,
+        paused: true,
+        preferredLayers:
+          maxSpatialLayer === undefined ? undefined : { spatialLayer: maxSpatialLayer },
+        appData: { participantId, producerId },
+      }),
+    );
+    if (priority !== undefined) await guarded(() => consumer.setPriority(priority));
+    this.consumers.set(consumer.id, { consumer, participantId, transportId, producerId });
+    consumer.on("layerschange", (layers) =>
+      this.emit({
+        type: "consumer_layers",
+        consumerId: consumer.id,
+        active: layers !== undefined,
+        spatialLayer: layers?.spatialLayer ?? 0,
+        temporalLayer: layers?.temporalLayer ?? 0,
+      }),
+    );
+    consumer.on("producerclose", () => this.dropConsumer(consumer.id, "producerclose"));
+    consumer.on("transportclose", () => this.dropConsumer(consumer.id, "transportclose"));
+    return {
+      consumerId: consumer.id,
+      kind: consumer.kind,
+      rtpParameters: consumer.rtpParameters,
+      producerPaused: consumer.producerPaused,
+    };
+  }
+
+  async setConsumerPaused(consumerId: string, paused: boolean): Promise<void> {
+    const entry = this.requireConsumer(consumerId);
+    await guarded(() => (paused ? entry.consumer.pause() : entry.consumer.resume()));
+  }
+
+  async unsubscribe(consumerId: string): Promise<void> {
+    const entry = this.requireConsumer(consumerId);
+    entry.consumer.close();
+    this.dropConsumer(consumerId, "unsubscribed");
+  }
+
+  async setLayer(
+    consumerId: string,
+    spatialLayer: number,
+    temporalLayer?: number,
+    priority?: number,
+  ): Promise<void> {
+    const entry = this.requireConsumer(consumerId);
+    await guarded(() => entry.consumer.setPreferredLayers({ spatialLayer, temporalLayer }));
+    if (priority !== undefined) await guarded(() => entry.consumer.setPriority(priority));
+  }
+
+  requireProducer(producerId: string): ProducerEntry {
+    const entry = this.producers.get(producerId);
+    if (!entry) throw new SfuError("NOT_FOUND", `producer ${producerId} not found`);
+    return entry;
+  }
+
+  requireConsumer(consumerId: string): ConsumerEntry {
+    const entry = this.consumers.get(consumerId);
+    if (!entry) throw new SfuError("NOT_FOUND", `consumer ${consumerId} not found`);
+    return entry;
+  }
+
+  private requireOwnedTransport(
+    transportId: string,
+    participantId: string,
+    direction: Direction,
+  ): TransportEntry {
+    const entry = this.requireTransport(transportId);
+    if (entry.participantId !== participantId) {
+      throw new SfuError("PERMISSION_DENIED", "transport belongs to another participant");
+    }
+    if (entry.direction !== direction) {
+      throw new SfuError("FAILED_PRECONDITION", `operation needs a ${direction} transport`);
+    }
+    return entry;
+  }
+
+  private dropProducer(producerId: string): void {
+    const entry = this.producers.get(producerId);
+    if (!entry) return;
+    this.producers.delete(producerId);
+    this.emit({
+      type: "producer_closed",
+      producerId,
+      trackId: entry.meta.trackId,
+      participantId: entry.meta.participantId,
+    });
+  }
+
+  private dropConsumer(
+    consumerId: string,
+    reason: "producerclose" | "transportclose" | "unsubscribed",
+  ): void {
+    if (!this.consumers.delete(consumerId)) return;
+    this.emit({ type: "consumer_closed", consumerId, reason });
+  }
 
   // ---- snapshot, events, lifecycle ----
 
@@ -381,6 +554,47 @@ export class RoomManager {
     const room = this.findRoomByConsumer(consumerId);
     if (!room) throw new SfuError("NOT_FOUND", `consumer ${consumerId} not found`);
     return room;
+  }
+
+  /** Subscribe with the cross-room check: a producer that lives in another room is PERMISSION_DENIED. */
+  async subscribe(
+    sessionId: string,
+    participantId: string,
+    transportId: string,
+    producerId: string,
+    rtpCapabilities: ms.RtpCapabilities,
+    maxSpatialLayer?: number,
+    priority?: number,
+  ): Promise<SubscribeResult> {
+    const room = this.require(sessionId);
+    // Call room.subscribe first so its own transport ownership/direction checks take priority
+    // over the cross-room reclassification below (a wrong-direction transport must still fail
+    // FAILED_PRECONDITION even when the producer id also belongs to another room).
+    try {
+      return await room.subscribe(
+        participantId,
+        transportId,
+        producerId,
+        rtpCapabilities,
+        maxSpatialLayer,
+        priority,
+      );
+    } catch (error) {
+      // Only reclassify the producer-specific NOT_FOUND from requireProducer (message contains
+      // producerId); a transport-lookup NOT_FOUND never does, so it always passes through as-is.
+      const isUnknownProducer =
+        error instanceof SfuError &&
+        error.code === "NOT_FOUND" &&
+        error.message.includes(producerId);
+      if (
+        isUnknownProducer &&
+        !room.producers.has(producerId) &&
+        this.findRoomByProducer(producerId)
+      ) {
+        throw new SfuError("PERMISSION_DENIED", "producer belongs to another room");
+      }
+      throw error;
+    }
   }
 
   async closeAll(): Promise<void> {
