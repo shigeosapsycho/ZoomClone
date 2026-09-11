@@ -15,9 +15,13 @@
     "format:check": "prettier --check .",
     "check": "pnpm typecheck && pnpm format:check && pnpm test",
     "db:migrate": "pnpm --filter @zoomclone/db migrate",
-    "dev": "pnpm -r --parallel dev"
+    "dev": "pnpm -r --parallel dev",
+    "proto:gen": "buf generate",
+    "proto:lint": "buf lint"
   },
   "devDependencies": {
+    "@bufbuild/buf": "1.72.0",
+    "@bufbuild/protoc-gen-es": "2.14.1",
     "prettier": "3.9.6",
     "typescript": "5.9.3"
   },

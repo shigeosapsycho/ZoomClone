@@ -1,0 +1,294 @@
+syntax = "proto3";
+
+package sfu.v1;
+
+// Room Controller <-> SFU contract (design doc "gRPC Sfu": spec 5.3 plus MVP additions).
+// mediasoup parameter blobs travel as JSON strings; ids, enums and flags are typed.
+service Sfu {
+  rpc AllocateRoom(AllocateRoomRequest) returns (AllocateRoomResponse);
+  rpc CloseRoom(CloseRoomRequest) returns (CloseRoomResponse);
+  rpc CreateTransport(CreateTransportRequest) returns (CreateTransportResponse);
+  rpc ConnectTransport(ConnectTransportRequest) returns (ConnectTransportResponse);
+  rpc CloseTransport(CloseTransportRequest) returns (CloseTransportResponse);
+  rpc RestartIce(RestartIceRequest) returns (RestartIceResponse);
+  rpc Publish(PublishRequest) returns (PublishResponse);
+  rpc Unpublish(UnpublishRequest) returns (UnpublishResponse);
+  rpc SetProducerPaused(SetProducerPausedRequest) returns (SetProducerPausedResponse);
+  rpc Subscribe(SubscribeRequest) returns (SubscribeResponse);
+  rpc SetConsumerPaused(SetConsumerPausedRequest) returns (SetConsumerPausedResponse);
+  rpc Unsubscribe(UnsubscribeRequest) returns (UnsubscribeResponse);
+  rpc SetLayer(SetLayerRequest) returns (SetLayerResponse);
+  rpc Cascade(CascadeRequest) returns (CascadeResponse);
+  rpc Stats(StatsRequest) returns (stream StatsEvent);
+}
+
+enum MediaKind {
+  MEDIA_KIND_UNSPECIFIED = 0;
+  MEDIA_KIND_AUDIO = 1;
+  MEDIA_KIND_VIDEO = 2;
+}
+
+enum MediaSource {
+  MEDIA_SOURCE_UNSPECIFIED = 0;
+  MEDIA_SOURCE_MIC = 1;
+  MEDIA_SOURCE_CAMERA = 2;
+  MEDIA_SOURCE_SCREEN = 3;
+  MEDIA_SOURCE_SCREEN_AUDIO = 4;
+}
+
+enum TransportDirection {
+  TRANSPORT_DIRECTION_UNSPECIFIED = 0;
+  TRANSPORT_DIRECTION_SEND = 1;
+  TRANSPORT_DIRECTION_RECV = 2;
+}
+
+message AllocateRoomRequest {
+  string session_id = 1;
+}
+
+message AllocateRoomResponse {
+  string rtp_capabilities_json = 1;
+  string sfu_id = 2;
+}
+
+message CloseRoomRequest {
+  string session_id = 1;
+}
+
+message CloseRoomResponse {}
+
+message CreateTransportRequest {
+  string session_id = 1;
+  string participant_id = 2;
+  TransportDirection direction = 3;
+}
+
+message CreateTransportResponse {
+  string transport_id = 1;
+  string ice_parameters_json = 2;
+  string ice_candidates_json = 3;
+  string dtls_parameters_json = 4;
+}
+
+message ConnectTransportRequest {
+  string transport_id = 1;
+  string dtls_parameters_json = 2;
+}
+
+message ConnectTransportResponse {}
+
+message CloseTransportRequest {
+  string transport_id = 1;
+}
+
+message CloseTransportResponse {}
+
+message RestartIceRequest {
+  string transport_id = 1;
+}
+
+message RestartIceResponse {
+  string ice_parameters_json = 1;
+}
+
+message PublishRequest {
+  string session_id = 1;
+  string participant_id = 2;
+  string transport_id = 3;
+  MediaKind kind = 4;
+  MediaSource source = 5;
+  string rtp_parameters_json = 6;
+  bool paused = 7;
+}
+
+message PublishResponse {
+  string producer_id = 1;
+  string track_id = 2;
+  uint32 layer_count = 3;
+}
+
+message UnpublishRequest {
+  string producer_id = 1;
+}
+
+message UnpublishResponse {}
+
+message SetProducerPausedRequest {
+  string producer_id = 1;
+  bool paused = 2;
+}
+
+message SetProducerPausedResponse {}
+
+message SubscribeRequest {
+  string session_id = 1;
+  string participant_id = 2;
+  string transport_id = 3;
+  string producer_id = 4;
+  string rtp_capabilities_json = 5;
+  optional uint32 max_spatial_layer = 6;
+  optional uint32 priority = 7;
+}
+
+message SubscribeResponse {
+  string consumer_id = 1;
+  MediaKind kind = 2;
+  string rtp_parameters_json = 3;
+  bool producer_paused = 4;
+}
+
+message SetConsumerPausedRequest {
+  string consumer_id = 1;
+  bool paused = 2;
+}
+
+message SetConsumerPausedResponse {}
+
+message UnsubscribeRequest {
+  string consumer_id = 1;
+}
+
+message UnsubscribeResponse {}
+
+message SetLayerRequest {
+  string consumer_id = 1;
+  uint32 spatial_layer = 2;
+  optional uint32 temporal_layer = 3;
+  optional uint32 priority = 4;
+}
+
+message SetLayerResponse {}
+
+message CascadeRequest {
+  string session_id = 1;
+  string remote_sfu_addr = 2;
+}
+
+message CascadeResponse {
+  string pipe_transport_id = 1;
+}
+
+message StatsRequest {
+  string session_id = 1;
+}
+
+// appData carried by every mediasoup entity, so a restarted controller can rebuild its bindings.
+message EntityMeta {
+  string sfu_id = 1;
+  string session_id = 2;
+  string participant_id = 3;
+  string track_id = 4;
+  MediaKind kind = 5;
+  MediaSource source = 6;
+  string origin = 7; // "local" | "pipe"
+}
+
+message TransportSnapshot {
+  string transport_id = 1;
+  string participant_id = 2;
+  TransportDirection direction = 3;
+  string ice_state = 4;
+  string dtls_state = 5;
+}
+
+message ProducerSnapshot {
+  string producer_id = 1;
+  EntityMeta meta = 2;
+  bool paused = 3;
+  uint32 layer_count = 4;
+  string transport_id = 5;
+}
+
+message ConsumerSnapshot {
+  string consumer_id = 1;
+  string producer_id = 2;
+  string participant_id = 3;
+  string transport_id = 4;
+  bool paused = 5;
+  bool producer_paused = 6;
+  optional uint32 preferred_spatial_layer = 7;
+  optional uint32 preferred_temporal_layer = 8;
+  optional uint32 current_spatial_layer = 9;
+  optional uint32 current_temporal_layer = 10;
+  uint32 priority = 11;
+}
+
+message Snapshot {
+  repeated TransportSnapshot transports = 1;
+  repeated ProducerSnapshot producers = 2;
+  repeated ConsumerSnapshot consumers = 3;
+}
+
+message SpeakerVolume {
+  string participant_id = 1;
+  string producer_id = 2;
+  int32 volume = 3; // dBov, -127..0
+}
+
+message DominantSpeakers {
+  repeated SpeakerVolume speakers = 1; // loudest first
+}
+
+message Silence {}
+
+message ConsumerLayers {
+  string consumer_id = 1;
+  bool active = 2; // false when no layer is being sent
+  uint32 spatial_layer = 3;
+  uint32 temporal_layer = 4;
+}
+
+message ProducerScore {
+  string producer_id = 1;
+  uint32 score = 2; // lowest score across simulcast layers, 0..10
+}
+
+message ProducerClosed {
+  string producer_id = 1;
+  string track_id = 2;
+  string participant_id = 3;
+}
+
+message ConsumerClosed {
+  string consumer_id = 1;
+  string reason = 2; // "producerclose" | "transportclose" | "unsubscribed"
+}
+
+message IceState {
+  string transport_id = 1;
+  string participant_id = 2;
+  string state = 3;
+}
+
+message TransportClosed {
+  string transport_id = 1;
+  string participant_id = 2;
+  string reason = 3; // "dtls_closed" | "dtls_failed" | "closed"
+}
+
+message Qos {
+  string transport_id = 1;
+  string participant_id = 2;
+  uint64 bytes_sent = 3;
+  uint64 bytes_received = 4;
+  double send_bitrate = 5;
+  double recv_bitrate = 6;
+  double available_outgoing_bitrate = 7;
+  double rtp_packet_loss_sent = 8;
+  double rtp_packet_loss_received = 9;
+}
+
+message StatsEvent {
+  oneof event {
+    Snapshot snapshot = 1;
+    DominantSpeakers dominant_speakers = 2;
+    Silence silence = 3;
+    ConsumerLayers consumer_layers = 4;
+    ProducerScore producer_score = 5;
+    ProducerClosed producer_closed = 6;
+    ConsumerClosed consumer_closed = 7;
+    IceState ice_state = 8;
+    TransportClosed transport_closed = 9;
+    Qos qos = 10;
+  }
+}
