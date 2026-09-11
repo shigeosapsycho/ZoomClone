@@ -54,6 +54,18 @@ export type FakeRoom = {
 };
 export type FakeCall = { method: string; request: Record<string, unknown> };
 
+/** Mirrors the real SFU's layer count (encodings.length); malformed or empty JSON counts as one. */
+function encodingCount(rtpParametersJson: string): number {
+  try {
+    const parsed = JSON.parse(rtpParametersJson) as { encodings?: unknown };
+    return Array.isArray(parsed.encodings) && parsed.encodings.length > 0
+      ? parsed.encodings.length
+      : 1;
+  } catch {
+    return 1;
+  }
+}
+
 class Queue<T> {
   private readonly items: T[] = [];
   private waiter: (() => void) | null = null;
@@ -413,7 +425,8 @@ export class FakeSfu {
           kind: req.kind,
           source: req.source,
           paused: req.paused,
-          layerCount: req.kind === MediaKind.VIDEO ? 3 : 1,
+          // Like the real SFU: one layer per encoding, so a non-simulcast video publish reads 1.
+          layerCount: encodingCount(req.rtpParametersJson),
         };
         room.producers.set(producer.id, producer);
         return {
@@ -440,6 +453,9 @@ export class FakeSfu {
         const room = this.requireRoom(req.sessionId);
         const transport = room.transports.get(req.transportId);
         if (!transport) throw new ConnectError("transport not found", Code.NotFound);
+        if (transport.participantId !== req.participantId) {
+          throw new ConnectError("not your transport", Code.PermissionDenied);
+        }
         if (transport.direction !== TransportDirection.RECV) {
           throw new ConnectError("wrong direction", Code.FailedPrecondition);
         }
