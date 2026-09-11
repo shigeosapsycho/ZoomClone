@@ -3,6 +3,7 @@ import { createClient, type Client } from "@connectrpc/connect";
 import { createGrpcTransport } from "@connectrpc/connect-node";
 import { SfuService } from "@zoomclone/sfu-proto";
 import type { types as ms } from "mediasoup";
+import pino from "pino";
 import { createSfuServer } from "../src/app";
 import { loadEnv, type Env } from "../src/env";
 import { createMetrics } from "../src/metrics";
@@ -23,8 +24,9 @@ export function testEnv(overrides: Record<string, string> = {}): Env {
 
 export async function createTestManager(overrides: Record<string, string> = {}) {
   const env = testEnv(overrides);
-  const slots: WorkerSlot[] = await createWorkers(env);
-  const manager = new RoomManager(slots, roomOptionsFrom(env));
+  const log = pino({ level: "silent" });
+  const slots: WorkerSlot[] = await createWorkers(env, log);
+  const manager = new RoomManager(slots, roomOptionsFrom(env, log));
   return {
     env,
     slots,

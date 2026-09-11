@@ -1,5 +1,6 @@
 import * as mediasoup from "mediasoup";
 import type { types as ms } from "mediasoup";
+import type { Logger } from "pino";
 import type { Env } from "./env";
 
 export type WorkerSlot = {
@@ -14,7 +15,7 @@ export type WorkerSlot = {
  * One worker per slot, one WebRtcServer per worker so every transport on that worker shares a
  * single UDP and TCP port (SFU_MEDIA_PORT_BASE + index). Docker and Windows friendly.
  */
-export async function createWorkers(env: Env): Promise<WorkerSlot[]> {
+export async function createWorkers(env: Env, log: Logger): Promise<WorkerSlot[]> {
   const slots: WorkerSlot[] = [];
   for (let index = 0; index < env.SFU_WORKERS; index++) {
     const worker = await mediasoup.createWorker({
@@ -23,7 +24,8 @@ export async function createWorkers(env: Env): Promise<WorkerSlot[]> {
       appData: { index },
     });
     worker.on("died", (error) => {
-      console.error(`mediasoup worker ${index} died`, error);
+      // fatal flushes synchronously, so the line survives the exit that follows it.
+      log.fatal({ err: error, index, pid: worker.pid }, "mediasoup worker died");
       process.exit(1);
     });
     const port = env.SFU_MEDIA_PORT_BASE + index;

@@ -213,10 +213,16 @@ function unary<I, O>(fn: (req: I) => Promise<O>): (req: I) => Promise<O> {
   };
 }
 
+/** Ids are plain strings on the wire; an empty one is a caller bug, not a lookup miss. */
+function requireId(value: string, name: string): string {
+  if (value === "") throw new ConnectError(`${name} is required`, Code.InvalidArgument);
+  return value;
+}
+
 /** The streaming handler has no unary() wrapper, so its room lookup maps the error itself. */
 function requireRoom(manager: RoomManager, sessionId: string): Room {
   try {
-    return manager.require(sessionId);
+    return manager.require(requireId(sessionId, "session_id"));
   } catch (error) {
     throw toConnectError(error);
   }
@@ -226,20 +232,20 @@ export function sfuRoutes(manager: RoomManager): (router: ConnectRouter) => void
   return (router) => {
     router.service(SfuService, {
       allocateRoom: unary(async (req) => {
-        const room = await manager.allocate(req.sessionId);
+        const room = await manager.allocate(requireId(req.sessionId, "session_id"));
         return {
           rtpCapabilitiesJson: JSON.stringify(room.router.rtpCapabilities),
           sfuId: manager.sfuId,
         };
       }),
       closeRoom: unary(async (req) => {
-        await manager.close(req.sessionId);
+        await manager.close(requireId(req.sessionId, "session_id"));
         return {};
       }),
       createTransport: unary(async (req) => {
-        const room = manager.require(req.sessionId);
+        const room = manager.require(requireId(req.sessionId, "session_id"));
         const params = await room.createTransport(
-          req.participantId,
+          requireId(req.participantId, "participant_id"),
           directionFromProto(req.direction),
         );
         return {
@@ -250,32 +256,35 @@ export function sfuRoutes(manager: RoomManager): (router: ConnectRouter) => void
         };
       }),
       connectTransport: unary(async (req) => {
-        const room = manager.requireRoomByTransport(req.transportId);
+        const transportId = requireId(req.transportId, "transport_id");
+        const room = manager.requireRoomByTransport(transportId);
         const dtls = parseJsonObject<ms.DtlsParameters>(
           "dtls_parameters_json",
           req.dtlsParametersJson,
         );
-        await room.connectTransport(req.transportId, dtls);
+        await room.connectTransport(transportId, dtls);
         return {};
       }),
       closeTransport: unary(async (req) => {
-        const room = manager.requireRoomByTransport(req.transportId);
-        await room.closeTransport(req.transportId);
+        const transportId = requireId(req.transportId, "transport_id");
+        const room = manager.requireRoomByTransport(transportId);
+        await room.closeTransport(transportId);
         return {};
       }),
       restartIce: unary(async (req) => {
-        const room = manager.requireRoomByTransport(req.transportId);
-        const ice = await room.restartIce(req.transportId);
+        const transportId = requireId(req.transportId, "transport_id");
+        const room = manager.requireRoomByTransport(transportId);
+        const ice = await room.restartIce(transportId);
         return { iceParametersJson: JSON.stringify(ice) };
       }),
       publish: unary(async (req) => {
-        const room = manager.require(req.sessionId);
         const kind = kindFromProto(req.kind);
         const source = sourceFromProto(req.source);
         const rtp = parseJsonObject<ms.RtpParameters>("rtp_parameters_json", req.rtpParametersJson);
-        const result = await room.publish(
-          req.participantId,
-          req.transportId,
+        const result = await manager.publish(
+          requireId(req.sessionId, "session_id"),
+          requireId(req.participantId, "participant_id"),
+          requireId(req.transportId, "transport_id"),
           kind,
           source,
           rtp,
@@ -288,13 +297,15 @@ export function sfuRoutes(manager: RoomManager): (router: ConnectRouter) => void
         };
       }),
       unpublish: unary(async (req) => {
-        const room = manager.requireRoomByProducer(req.producerId);
-        await room.unpublish(req.producerId);
+        const producerId = requireId(req.producerId, "producer_id");
+        const room = manager.requireRoomByProducer(producerId);
+        await room.unpublish(producerId);
         return {};
       }),
       setProducerPaused: unary(async (req) => {
-        const room = manager.requireRoomByProducer(req.producerId);
-        await room.setProducerPaused(req.producerId, req.paused);
+        const producerId = requireId(req.producerId, "producer_id");
+        const room = manager.requireRoomByProducer(producerId);
+        await room.setProducerPaused(producerId, req.paused);
         return {};
       }),
       subscribe: unary(async (req) => {
@@ -303,10 +314,10 @@ export function sfuRoutes(manager: RoomManager): (router: ConnectRouter) => void
           req.rtpCapabilitiesJson,
         );
         const result = await manager.subscribe(
-          req.sessionId,
-          req.participantId,
-          req.transportId,
-          req.producerId,
+          requireId(req.sessionId, "session_id"),
+          requireId(req.participantId, "participant_id"),
+          requireId(req.transportId, "transport_id"),
+          requireId(req.producerId, "producer_id"),
           caps,
           req.maxSpatialLayer,
           req.priority,
@@ -319,18 +330,21 @@ export function sfuRoutes(manager: RoomManager): (router: ConnectRouter) => void
         };
       }),
       setConsumerPaused: unary(async (req) => {
-        const room = manager.requireRoomByConsumer(req.consumerId);
-        await room.setConsumerPaused(req.consumerId, req.paused);
+        const consumerId = requireId(req.consumerId, "consumer_id");
+        const room = manager.requireRoomByConsumer(consumerId);
+        await room.setConsumerPaused(consumerId, req.paused);
         return {};
       }),
       unsubscribe: unary(async (req) => {
-        const room = manager.requireRoomByConsumer(req.consumerId);
-        await room.unsubscribe(req.consumerId);
+        const consumerId = requireId(req.consumerId, "consumer_id");
+        const room = manager.requireRoomByConsumer(consumerId);
+        await room.unsubscribe(consumerId);
         return {};
       }),
       setLayer: unary(async (req) => {
-        const room = manager.requireRoomByConsumer(req.consumerId);
-        await room.setLayer(req.consumerId, req.spatialLayer, req.temporalLayer, req.priority);
+        const consumerId = requireId(req.consumerId, "consumer_id");
+        const room = manager.requireRoomByConsumer(consumerId);
+        await room.setLayer(consumerId, req.spatialLayer, req.temporalLayer, req.priority);
         return {};
       }),
       cascade: unary(async () => {

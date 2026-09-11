@@ -222,12 +222,39 @@ describe("Sfu gRPC service", () => {
         }),
       ),
     ).toBe(Code.NotFound);
+    expect(
+      await codeOf(
+        sfu.client.publish({
+          sessionId: "g4",
+          participantId: "A",
+          transportId: sendA.transportId,
+          kind: MediaKind.AUDIO,
+          source: MediaSource.MIC,
+          rtpParametersJson: JSON.stringify(audioRtpParameters()),
+          paused: false,
+        }),
+      ),
+    ).toBe(Code.PermissionDenied);
     expect(await codeOf(sfu.client.cascade({ sessionId: "g3", remoteSfuAddr: "sfu-2:9090" }))).toBe(
       Code.Unimplemented,
     );
     expect(
       await codeOf(sfu.client.stats({ sessionId: "missing" })[Symbol.asyncIterator]().next()),
     ).toBe(Code.NotFound);
+    expect(await codeOf(sfu.client.allocateRoom({ sessionId: "" }))).toBe(Code.InvalidArgument);
+    expect(
+      await codeOf(
+        sfu.client.createTransport({
+          sessionId: "g3",
+          participantId: "",
+          direction: TransportDirection.SEND,
+        }),
+      ),
+    ).toBe(Code.InvalidArgument);
+    expect(await codeOf(sfu.client.unsubscribe({ consumerId: "" }))).toBe(Code.InvalidArgument);
+    expect(await codeOf(sfu.client.stats({ sessionId: "" })[Symbol.asyncIterator]().next())).toBe(
+      Code.InvalidArgument,
+    );
   });
 
   it("streams a snapshot then live events, and ends when the room closes", async () => {

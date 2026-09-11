@@ -249,9 +249,11 @@ Stats(session_id) -> stream StatsEvent
 (on `layerschange`), `producer_score`, `producer_closed`, `consumer_closed`, `ice_state`,
 `transport_closed`, `qos` (per transport every `SFU_QOS_INTERVAL_MS`, default 5000: bytes, rtt,
 loss; logged only in MVP). mediasoup blobs travel as JSON strings; ids and enums are typed
-fields. Error mapping: unknown ids `NOT_FOUND`; wrong room `PERMISSION_DENIED`; transport not
-connected or wrong direction `FAILED_PRECONDITION`; mediasoup errors `INTERNAL` with message.
-`room_closed` is internal to the SFU; the stream simply ends when the room closes.
+fields. Error mapping: unknown ids `NOT_FOUND`; wrong room `PERMISSION_DENIED`; wrong transport
+direction or incompatible capabilities `FAILED_PRECONDITION` (Subscribe only needs the recv
+transport to exist; mediasoup-client connects it on the first consume); mediasoup errors
+`INTERNAL` with message. `room_closed` is internal to the SFU; the stream simply ends when the
+room closes.
 
 ## Components
 
@@ -273,8 +275,8 @@ connected or wrong direction `FAILED_PRECONDITION`; mediasoup errors `INTERNAL` 
 - `stats.ts`: per-room async generator for the `Stats` stream: emit snapshot, then fan
   AudioLevelObserver `volumes`/`silence`, consumer `layerschange`, producer `score`, producer and
   consumer close, transport `icestatechange` / `dtlsstatechange`, periodic `getStats` sample.
-- `main.ts`: http2 server + `connectNodeAdapter`, `/healthz`, prom metrics (`sfu_sessions`,
-  `sfu_egress_bps` from the qos sampler).
+- `main.ts`: http2 server + `connectNodeAdapter`, `/healthz`, prom metrics (`sfu_rooms`,
+  `sfu_transports`).
 
 ### services/meeting-api
 

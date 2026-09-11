@@ -59,7 +59,8 @@ curl -s -X POST localhost:8080/v1/join -H 'content-type: application/json' \
 mediasoup workers behind the `sfu.v1.SfuService` contract (`proto/sfu/v1/sfu.proto`). One
 `WebRtcServer` per worker, so each worker uses exactly one UDP and one TCP port:
 `SFU_MEDIA_PORT_BASE + index`. Set `SFU_ANNOUNCED_IP` to the address browsers can reach (the host's
-LAN IP when testing from another device; `127.0.0.1` for a single machine).
+LAN IP when testing from another device; `127.0.0.1` for a single machine). The gRPC port is
+unauthenticated; keep it on a private network (the signaling service is its only client).
 
 ```sh
 pnpm proto:gen                       # regenerate packages/sfu-proto after editing the proto

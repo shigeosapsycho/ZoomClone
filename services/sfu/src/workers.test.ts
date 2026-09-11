@@ -1,3 +1,4 @@
+import pino from "pino";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadEnv } from "./env";
 import { closeWorkers, createWorkers, pickWorker, type WorkerSlot } from "./workers";
@@ -9,7 +10,7 @@ beforeAll(async () => {
     SFU_WORKERS: "2",
     SFU_MEDIA_PORT_BASE: String(42000 + Math.floor(Math.random() * 900)),
   });
-  slots = await createWorkers(env);
+  slots = await createWorkers(env, pino({ level: "silent" }));
 });
 
 afterAll(async () => {

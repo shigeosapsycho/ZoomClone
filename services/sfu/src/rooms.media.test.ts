@@ -155,6 +155,22 @@ describe("subscribe", () => {
     ).rejects.toMatchObject({ code: "FAILED_PRECONDITION" });
   });
 
+  it("rejects another room's transport as PERMISSION_DENIED, not NOT_FOUND", async () => {
+    const other = await manager.allocate("media-3");
+    const pub = await room.publish("A", sendA, "audio", "mic", audioRtpParameters(), false);
+    await expect(
+      manager.publish("media-3", "A", sendA, "audio", "mic", audioRtpParameters(), false),
+    ).rejects.toMatchObject({ code: "PERMISSION_DENIED" });
+    await expect(
+      manager.subscribe("media-3", "B", recvB, pub.producerId, other.router.rtpCapabilities),
+    ).rejects.toMatchObject({ code: "PERMISSION_DENIED" });
+    await expect(
+      manager.publish("media-3", "A", "nope", "audio", "mic", audioRtpParameters(), false),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(other.producers.size).toBe(0);
+    expect(other.consumers.size).toBe(0);
+  });
+
   it("closes consumers when the producer goes away and emits both events", async () => {
     const events: RoomEvent[] = [];
     const controller = new AbortController();

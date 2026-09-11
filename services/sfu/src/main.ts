@@ -51,7 +51,7 @@ async function shutdown(signal: string): Promise<void> {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-const slots = await createWorkers(env);
+const slots = await createWorkers(env, log);
 const manager = new RoomManager(slots, roomOptionsFrom(env, log));
 const server = createSfuServer(manager, createMetrics(manager));
 app = { slots, manager, server };

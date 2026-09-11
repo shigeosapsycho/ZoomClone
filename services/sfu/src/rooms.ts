@@ -571,13 +571,19 @@ export class RoomManager {
     const router = await guarded(() =>
       slot.worker.createRouter({ mediaCodecs: MEDIA_CODECS, appData: { sessionId } }),
     );
-    const audioLevelObserver = await guarded(() =>
-      router.createAudioLevelObserver({
-        maxEntries: 5,
-        threshold: -60,
-        interval: this.options.audioLevelIntervalMs,
-      }),
-    );
+    let audioLevelObserver: ms.AudioLevelObserver;
+    try {
+      audioLevelObserver = await guarded(() =>
+        router.createAudioLevelObserver({
+          maxEntries: 5,
+          threshold: -60,
+          interval: this.options.audioLevelIntervalMs,
+        }),
+      );
+    } catch (error) {
+      router.close(); // nobody holds the router yet; do not leak it on the worker
+      throw error;
+    }
     slot.rooms += 1;
     const room = new Room(sessionId, slot, router, audioLevelObserver, this.options);
     this.roomsById.set(sessionId, room);
@@ -646,7 +652,22 @@ export class RoomManager {
     return room;
   }
 
-  /** Subscribe with the cross-room check: a producer that lives in another room is PERMISSION_DENIED. */
+  /** Publish with the cross-room check: a transport in another room is PERMISSION_DENIED. */
+  async publish(
+    sessionId: string,
+    participantId: string,
+    transportId: string,
+    kind: Kind,
+    source: Source,
+    rtpParameters: ms.RtpParameters,
+    paused: boolean,
+  ): Promise<PublishResult> {
+    const room = this.require(sessionId);
+    this.assertTransportNotElsewhere(room, transportId);
+    return room.publish(participantId, transportId, kind, source, rtpParameters, paused);
+  }
+
+  /** Subscribe with the cross-room checks: another room's transport or producer is denied. */
   async subscribe(
     sessionId: string,
     participantId: string,
@@ -657,8 +678,9 @@ export class RoomManager {
     priority?: number,
   ): Promise<SubscribeResult> {
     const room = this.require(sessionId);
-    // Check transport ownership/direction first so a wrong-direction transport still fails
-    // FAILED_PRECONDITION even when the producer id also belongs to another room.
+    // Check the transport first so a wrong-direction transport still fails FAILED_PRECONDITION
+    // even when the producer id also belongs to another room.
+    this.assertTransportNotElsewhere(room, transportId);
     room.requireOwnedTransport(transportId, participantId, "recv");
     if (!room.producers.has(producerId) && this.findRoomByProducer(producerId)) {
       throw new SfuError("PERMISSION_DENIED", "producer belongs to another room");
@@ -671,5 +693,14 @@ export class RoomManager {
       maxSpatialLayer,
       priority,
     );
+  }
+
+  /** A transport id that resolves to a different room is a cross-room access, not a missing id. */
+  private assertTransportNotElsewhere(room: Room, transportId: string): void {
+    if (room.transports.has(transportId)) return;
+    const owner = this.findRoomByTransport(transportId);
+    if (owner && owner !== room) {
+      throw new SfuError("PERMISSION_DENIED", "transport belongs to another room");
+    }
   }
 }

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CLIENT_DTLS_PARAMETERS, createTestManager, waitFor } from "../test/helpers";
 import type { RoomEvent } from "./events";
-import type { RoomManager } from "./rooms";
+import { RoomManager, roomOptionsFrom } from "./rooms";
 
 let ctx: Awaited<ReturnType<typeof createTestManager>>;
 let manager: RoomManager;
@@ -71,6 +71,24 @@ describe("RoomManager rooms", () => {
     await manager.closeAll();
     expect((await allocation).isClosed).toBe(true);
     expect(manager.size).toBe(0);
+  });
+
+  it("closes the router when the audio level observer cannot be created", async () => {
+    const slot = ctx.slots[0]!;
+    const routersBefore = (await slot.worker.dump()).routerIds.length;
+    const roomsBefore = slot.rooms;
+    // mediasoup validates the interval's type in JS before talking to the worker; a non-number is
+    // the one observer failure a test can provoke without mocks, hence the cast.
+    const broken = new RoomManager(ctx.slots, {
+      ...roomOptionsFrom(ctx.env),
+      audioLevelIntervalMs: "soon" as unknown as number,
+    });
+    await expect(broken.allocate("no-observer")).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+    });
+    expect(broken.size).toBe(0);
+    expect(slot.rooms).toBe(roomsBefore);
+    expect((await slot.worker.dump()).routerIds).toHaveLength(routersBefore);
   });
 });
 
