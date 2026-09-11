@@ -9,6 +9,7 @@ import { registerAuthHook } from "./auth/hooks";
 import { authRoutes } from "./auth/routes";
 import type { AppDeps } from "./deps";
 import { errorHandler, notFoundHandler } from "./error-handler";
+import { joinRoutes } from "./join/routes";
 import { meetingRoutes } from "./meetings/routes";
 
 declare module "fastify" {
@@ -40,6 +41,7 @@ export async function buildApp(deps: AppDeps): Promise<App> {
     });
   }
   await app.register(meetingRoutes, { prefix: "/v1" });
+  await app.register(joinRoutes, { prefix: "/v1" });
 
   const r = app.withTypeProvider<ZodTypeProvider>();
   r.get("/healthz", async () => ({ ok: true }));
