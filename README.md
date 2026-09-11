@@ -71,3 +71,21 @@ curl -s --http2-prior-knowledge localhost:9090/healthz
 Errors map to gRPC codes: unknown ids `NOT_FOUND`, another room's or participant's entity
 `PERMISSION_DENIED`, wrong transport direction or incompatible capabilities `FAILED_PRECONDITION`,
 bad JSON `INVALID_ARGUMENT`, `Cascade` `UNIMPLEMENTED`.
+
+## Signaling (ws :8081)
+
+The signaling gateway and room controller run in one process (`services/signaling`). Clients
+connect to `ws://localhost:8081/rooms/{session_id}` with the token from `POST /v1/join` and
+speak the protocol in `packages/protocol/src/ws` (every request is answered by `ack` or `error`;
+`hello` is answered by `ack {mode}` followed by `welcome`, `resync` or replayed events).
+
+```sh
+pnpm --filter @zoomclone/signaling start   # or: pnpm dev (all services)
+curl -s localhost:8081/healthz              # {"ok":true,"rooms":0}
+```
+
+Room state is checkpointed to Redis (`{room:<session_id>}:*`) within 50 ms of every change and an
+owner lease keeps one controller per room. Kill and restart the process: clients reconnect, the
+room rehydrates from Redis plus the SFU snapshot with a new `epoch`, and they receive a `resync`.
+Attendance rows and session end are written to Postgres by the bus consumer in `src/writer`.
+Verify the JWT issuer: `TOKEN_ISSUER` must match meeting-api's value (default `meeting-api`).
