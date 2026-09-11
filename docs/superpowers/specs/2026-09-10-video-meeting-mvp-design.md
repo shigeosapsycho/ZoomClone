@@ -229,7 +229,7 @@ CloseRoom(session_id)                                                     idempo
 CreateTransport(session_id, participant_id, direction) -> transport_id, ice_parameters_json, ice_candidates_json, dtls_parameters_json
 ConnectTransport(transport_id, dtls_parameters_json)                     [added]
 CloseTransport(transport_id)                                             [added]
-RestartIce(transport_id) -> ice_parameters_json                          [added, UNIMPLEMENTED in MVP]
+RestartIce(transport_id) -> ice_parameters_json                          [added, implemented: mediasoup restartIce]
 Publish(session_id, participant_id, transport_id, kind, source, rtp_parameters_json, paused) -> producer_id, track_id, layer_count
 Unpublish(producer_id)
 SetProducerPaused(producer_id, paused)                                   [added: mute / video off]
@@ -251,6 +251,7 @@ Stats(session_id) -> stream StatsEvent
 loss; logged only in MVP). mediasoup blobs travel as JSON strings; ids and enums are typed
 fields. Error mapping: unknown ids `NOT_FOUND`; wrong room `PERMISSION_DENIED`; transport not
 connected or wrong direction `FAILED_PRECONDITION`; mediasoup errors `INTERNAL` with message.
+`room_closed` is internal to the SFU; the stream simply ends when the room closes.
 
 ## Components
 

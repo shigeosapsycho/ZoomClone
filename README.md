@@ -53,3 +53,20 @@ CODE=$(curl -s -X POST localhost:8080/v1/meetings -H "authorization: Bearer $TOK
 curl -s -X POST localhost:8080/v1/join -H 'content-type: application/json' \
   -d "{\"code\":\"$CODE\",\"display_name\":\"Guest\"}"
 ```
+
+## SFU (gRPC :9090, media UDP/TCP :40000+)
+
+mediasoup workers behind the `sfu.v1.SfuService` contract (`proto/sfu/v1/sfu.proto`). One
+`WebRtcServer` per worker, so each worker uses exactly one UDP and one TCP port:
+`SFU_MEDIA_PORT_BASE + index`. Set `SFU_ANNOUNCED_IP` to the address browsers can reach (the host's
+LAN IP when testing from another device; `127.0.0.1` for a single machine).
+
+```sh
+pnpm proto:gen                       # regenerate packages/sfu-proto after editing the proto
+pnpm --filter @zoomclone/sfu start   # or: pnpm dev (all services)
+curl -s --http2-prior-knowledge localhost:9090/healthz
+```
+
+Errors map to gRPC codes: unknown ids `NOT_FOUND`, another room's or participant's entity
+`PERMISSION_DENIED`, wrong transport direction or incompatible capabilities `FAILED_PRECONDITION`,
+bad JSON `INVALID_ARGUMENT`, `Cascade` `UNIMPLEMENTED`.
