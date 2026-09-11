@@ -195,7 +195,8 @@ roster?, tracks?, lobby?, room_meta?, media?}`. `state: "lobby"` carries only th
 (mediasoup transport params: id, ice_parameters, ice_candidates, dtls_parameters). On admit the
 waiter receives `lobby.result {admitted: true}` then a `resync` with the full snapshot and media;
 on deny `lobby.result {admitted: false}` then close 4003. Lobby waiters also receive `room.ended`.
-Waiters count as activity for the idle timer.
+Waiters count as activity for the idle timer. Waiters do not survive a controller restart: the
+rehydrated room drops them and they re-request on their next hello.
 
 Reconnect: `hello {resume_seq, epoch}` within the 30 s grace, with matching epoch, replays
 events targeted to that participant with `seq > resume_seq` from the ring buffer (last 500
@@ -204,9 +205,10 @@ because the write-behind checkpoint can lag the live `seq` by up to 50 ms and a 
 controller could otherwise reissue numbers clients already saw. A newer connection for the same
 participant closes the older one (4005) without starting the grace timer. Media transports are
 untouched by signaling reconnect. After `resync`, the client compares transport ids with its
-own and rebuilds transports if they changed (SFU room was recreated). Lobby waiters have no
-grace: a waiter whose socket closes leaves the lobby at once (hosts receive `lobby.left`) and
-re-requests on the next `hello`.
+own and rebuilds transports if they changed (SFU room was recreated). A resume after the SFU had
+to recreate transports is answered with `resync` (new `media`) even when a replay would otherwise
+be possible. Lobby waiters have no grace: a waiter whose socket closes leaves the lobby at once
+(hosts receive `lobby.left`) and re-requests on the next `hello`.
 
 `departed` map (checkpointed): participant_id -> reason. A `hello` for a departed participant
 closes with the matching code: 4002 removed by host, 4003 lobby denied, 4008 grace expired

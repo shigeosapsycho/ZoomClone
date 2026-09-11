@@ -128,6 +128,12 @@ class Connection {
   private attaching = false;
   private closed = false;
   private lastPingAt = Date.now();
+  /**
+   * Frames run one at a time in arrival order (pings included, they are cheap): two subscribes
+   * in one SFU round trip would otherwise create two consumers for a track, and two media state
+   * toggles would race each other's pause calls.
+   */
+  private queue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly ws: WebSocket,
@@ -152,7 +158,13 @@ class Connection {
       },
       Math.max(50, Math.floor(deps.env.PING_TIMEOUT_MS / 3)),
     );
-    ws.on("message", (data) => void this.onMessage(data));
+    ws.on("message", (data) => {
+      this.queue = this.queue
+        .then(() => this.onMessage(data))
+        .catch((error: unknown) =>
+          deps.log.error({ link: this.link.id, error }, "message handler failed"),
+        );
+    });
     ws.on("close", () => this.onClose());
     ws.on("error", (error) => deps.log.debug({ link: this.link.id, error }, "socket error"));
   }

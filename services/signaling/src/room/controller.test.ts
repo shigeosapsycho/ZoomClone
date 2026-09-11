@@ -1,8 +1,9 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { Code } from "@connectrpc/connect";
+import { Code, createClient } from "@connectrpc/connect";
+import { createGrpcTransport } from "@connectrpc/connect-node";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { CloseCode, type ClientMessage } from "@zoomclone/protocol";
-import { TransportDirection } from "@zoomclone/sfu-proto";
+import { SfuService, TransportDirection } from "@zoomclone/sfu-proto";
 import { FakeSfu, FAKE_RTP_CAPABILITIES } from "../../test/fake-sfu";
 import {
   FakeLink,
@@ -718,6 +719,82 @@ describe("RoomController: presence and reconnects", () => {
       payload: { consumers: [{ track_id: "trk1", consumer_id: "c2" }], removed: [] },
     });
     expect(sfu.callsTo("subscribe").at(-1)?.request["transportId"]).toBe("t6");
+  });
+
+  it("a resume that had to rebuild transports answers resync with the new media even when a replay would be possible", async () => {
+    const t = await startRoom();
+    const S = t.room.sessionId;
+    const ann = await join(t, { participant_id: A });
+    await request(t, ann, A, "publish", {
+      kind: "audio",
+      source: "mic",
+      rtp_parameters: {},
+      paused: false,
+    });
+    for (const transportId of ["t1", "t2"]) {
+      sfu.emit(S, {
+        case: "transportClosed",
+        value: { transportId, participantId: A, reason: "dtls" },
+      });
+    }
+    // The producer close behind them proves all three events were processed (track.removed reaches A).
+    sfu.emit(S, {
+      case: "producerClosed",
+      value: { producerId: "p1", trackId: "trk1", participantId: A },
+    });
+    await ann.waitFor("track.removed");
+    const seq = t.room.seq;
+    t.controller.detach(ann, A);
+    const back = new FakeLink();
+    expect(
+      await t.controller.attach(back, mintClaims({ session_id: S, participant_id: A }), {
+        id: "re",
+        resume_seq: seq,
+        epoch: 1,
+      }),
+    ).toBe(A);
+    expect(back.sent.map((m) => m.type)).toEqual(["ack", "resync"]);
+    expect(back.sent[0]).toMatchObject({ payload: { mode: "resync" } });
+    expect(back.ofType("resync")[0]?.payload.media).toMatchObject({
+      send_transport: { id: "t3" },
+      recv_transport: { id: "t4" },
+    });
+    expect(sfu.callsTo("createTransport")).toHaveLength(4);
+  });
+
+  it("a reopened stats stream whose snapshot lost the transports closes those sockets 1012, and the re-hello gets new media", async () => {
+    const t = await startRoom();
+    const S = t.room.sessionId;
+    const ann = await join(t, { participant_id: A });
+    const bob = await join(t, { participant_id: B });
+    const seq = t.room.seq;
+    // The SFU restarted: the room vanishes, the stream ends, the consumer reopens after an
+    // AllocateRoom and the new snapshot carries no transports for anyone.
+    const client = createClient(SfuService, createGrpcTransport({ baseUrl: sfu.baseUrl }));
+    await client.closeRoom({ sessionId: S });
+    await waitFor(() => ann.closed && bob.closed);
+    for (const link of [ann, bob]) {
+      expect(link.closedWith).toEqual({ code: 1012, reason: "media reset, reconnect" });
+    }
+    expect(t.controller.connectionCount).toBe(0);
+    expect(t.room.rosterEntry(A)?.connected).toBe(false);
+    expect(t.room.rosterEntry(B)?.connected).toBe(false);
+    const back = new FakeLink();
+    expect(
+      await t.controller.attach(back, mintClaims({ session_id: S, participant_id: A }), {
+        id: "re",
+        resume_seq: seq,
+        epoch: 1,
+      }),
+    ).toBe(A);
+    expect(back.sent[0]).toMatchObject({ type: "ack", payload: { mode: "resync" } });
+    expect(back.ofType("resync")[0]?.payload.media).toMatchObject({
+      send_transport: { id: "t5" },
+      recv_transport: { id: "t6" },
+    });
+    expect(sfu.callsTo("createTransport")).toHaveLength(6);
+    expect(sfu.callsTo("closeTransport")).toHaveLength(0);
+    expect(t.room.rosterEntry(A)?.connected).toBe(true);
   });
 });
 

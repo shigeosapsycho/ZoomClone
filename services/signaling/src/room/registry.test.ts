@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { createClient } from "@connectrpc/connect";
 import { createGrpcTransport } from "@connectrpc/connect-node";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { CloseCode } from "@zoomclone/protocol";
+import { CloseCode, type SignalingClaims } from "@zoomclone/protocol";
 import { SfuService } from "@zoomclone/sfu-proto";
 import { FakeSfu } from "../../test/fake-sfu";
 import {
@@ -26,6 +26,7 @@ import { Room } from "./room";
 
 const HOST = "11111111-1111-4111-8111-111111111111";
 const A = "22222222-2222-4222-8222-222222222222";
+const W = "44444444-4444-4444-8444-444444444444";
 const SEED = { sfu_hint: "fake-sfu", lobby_enabled: true, max_participants: 10 };
 
 let infra: TestInfra;
@@ -60,11 +61,17 @@ async function attach(
   participantId: string,
   role: "host" | "attendee" = "attendee",
   hello: { resume_seq?: number; epoch?: number } = {},
+  claims: Partial<SignalingClaims> = {},
 ) {
   const link = new FakeLink();
   const pid = await controller.attach(
     link,
-    mintClaims({ session_id: controller.sessionId, participant_id: participantId, role }),
+    mintClaims({
+      session_id: controller.sessionId,
+      participant_id: participantId,
+      role,
+      ...claims,
+    }),
     { id: `h-${participantId.slice(0, 4)}`, ...hello },
   );
   return { link, pid };
@@ -192,14 +199,53 @@ describe("RoomRegistry", () => {
     expect(sfu.callsTo("createTransport")).toHaveLength(4);
     expect(c2.room.rosterEntry(A)?.connected).toBe(true);
 
-    // The SFU restarts: the room vanishes, the stats stream ends, the controller reopens and reconciles.
+    // The SFU restarts: the room vanishes, the stats stream ends, the controller reopens and
+    // reconciles against an empty snapshot. A's socket was attached to dead media, so it is
+    // bounced; its re-hello rebuilds the transports even though a replay would be possible.
     const client = createClient(SfuService, createGrpcTransport({ baseUrl: sfu.baseUrl }));
     await client.closeRoom({ sessionId });
-    const removed = await annBack.waitFor("track.removed");
-    expect(removed.payload).toEqual({ track_id: "host-cam" });
+    await waitFor(() => annBack.closed);
+    expect(annBack.closedWith).toEqual({ code: 1012, reason: "media reset, reconnect" });
     expect(c2.room.tracks()).toEqual([]);
+    expect(c2.room.rosterEntry(A)).toMatchObject({ connected: false });
+    const { link: annAgain } = await attach(c2, A, "attendee", {
+      resume_seq: c2.room.seq,
+      epoch: 2,
+    });
+    expect(annAgain.sent[0]).toMatchObject({ type: "ack", payload: { mode: "resync" } });
+    expect(annAgain.ofType("resync")[0]?.payload.media).toMatchObject({
+      send_transport: { id: "t5" },
+      recv_transport: { id: "t6" },
+    });
     const { link: hostBack } = await attach(c2, HOST, "host");
-    expect(hostBack.ofType("resync")[0]?.payload.media?.send_transport.id).toBe("t5");
-    expect(sfu.callsTo("createTransport")).toHaveLength(6);
+    expect(hostBack.ofType("resync")[0]?.payload.media?.send_transport.id).toBe("t7");
+    expect(sfu.callsTo("createTransport")).toHaveLength(8);
+  });
+
+  it("a rehydrated room drops its lobby waiters and ends by idle when nobody reconnects", async () => {
+    const { sessionId } = await seedSession(infra.db);
+    const first = registry();
+    const c1 = await first.get(sessionId, SEED);
+    await attach(c1, HOST, "host");
+    const { pid } = await attach(c1, W, "attendee", {}, { lobby: true });
+    expect(pid).toBe(W);
+    expect(c1.room.lobbyIds()).toEqual([W]);
+    await sleep(60);
+    expect(await infra.redis.hlen(roomKeys(sessionId).lobby)).toBe(1);
+    await first.closeAll();
+
+    // The waiter's socket died with the old process and waiters have no grace: the rehydrated
+    // room starts without it, so the host's grace expiry alone makes the room idle.
+    const second = registry({ idleMs: 200 });
+    const c2 = await second.get(sessionId, SEED);
+    expect(c2.room.lobby()).toEqual([]);
+    expect(c2.room.rosterEntry(HOST)).toMatchObject({ connected: false });
+    expect(await infra.redis.hlen(roomKeys(sessionId).lobby)).toBe(0);
+    await waitFor(() => second.size === 0, 3000);
+    expect(second.size).toBe(0);
+    expect(await infra.redis.hgetall(roomKeys(sessionId).meta)).toMatchObject({
+      status: "ended",
+      end_reason: "idle",
+    });
   });
 });

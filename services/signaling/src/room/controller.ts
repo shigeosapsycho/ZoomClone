@@ -44,6 +44,7 @@ import {
   DEFAULT_PRIORITY,
   MediaBindings,
   type ConsumerBinding,
+  type Transports,
 } from "./media-bindings";
 import type { Room } from "./room";
 import type { Command, Emitted, RoomError, Target } from "./types";
@@ -153,6 +154,14 @@ export class RoomController {
       this.stats.stop();
       throw error;
     }
+    // Nobody is attached yet, so any waiter here came from the checkpoint: its socket died with
+    // the previous controller and waiters have no grace. Kept, it would hold the idle timer off
+    // forever and could be admitted into a roster entry with no link. It re-requests on its
+    // next hello; the initial checkpoint below already writes the emptied lobby.
+    for (const participantId of this.room.lobbyIds()) {
+      const outcome = this.room.apply({ type: "lobby_leave", participant_id: participantId });
+      if (outcome.ok) this.fanout(outcome.events);
+    }
     await this.deps.checkpoint.writeAll();
     this.heartbeat = setInterval(() => void this.heartbeatTick(), this.deps.timings.heartbeatMs);
     this.speakerTimer = setInterval(
@@ -221,7 +230,7 @@ export class RoomController {
   }
 
   private async resume(link: ParticipantLink, pid: string, hello: HelloPayload): Promise<string> {
-    const media = await this.ensureTransports(pid);
+    const { media, rebuilt } = await this.ensureTransports(pid);
     if (!this.room.inRoster(pid)) {
       await this.closeTransports(pid);
       const departed = this.room.departed(pid);
@@ -233,8 +242,9 @@ export class RoomController {
     }
     this.takeover(pid, link);
     this.applyOrThrow({ type: "reconnect", participant_id: pid });
+    // A replay carries no media, so rebuilt transports would stay unknown to the client: resync.
     const replay =
-      hello.resume_seq !== undefined && hello.epoch === this.room.epoch
+      !rebuilt && hello.resume_seq !== undefined && hello.epoch === this.room.epoch
         ? this.room.replay(pid, hello.resume_seq)
         : null;
     if (replay) {
@@ -480,17 +490,21 @@ export class RoomController {
     return { rtp_capabilities: this.rtpCapabilities, send_transport: send, recv_transport: recv };
   }
 
-  private async ensureTransports(pid: string): Promise<MediaParams> {
+  /** rebuilt: the bindings no longer had both transports, so fresh ones were created. */
+  private async ensureTransports(pid: string): Promise<{ media: MediaParams; rebuilt: boolean }> {
     const existing = this.bindings.transportsOf(pid);
     if (existing.send && existing.recv) {
       return {
-        rtp_capabilities: this.rtpCapabilities,
-        send_transport: existing.send,
-        recv_transport: existing.recv,
+        media: {
+          rtp_capabilities: this.rtpCapabilities,
+          send_transport: existing.send,
+          recv_transport: existing.recv,
+        },
+        rebuilt: false,
       };
     }
     await this.closeTransports(pid);
-    return this.createTransports(pid);
+    return { media: await this.createTransports(pid), rebuilt: true };
   }
 
   /**
@@ -965,7 +979,10 @@ export class RoomController {
   /** Both-way reconcile with the SFU's view (design doc "RoomRegistry" rehydrate). */
   private reconcile(snapshot: Snapshot): void {
     if (this.gone) return;
+    const before = new Map<string, Transports>();
+    for (const pid of this.room.rosterIds()) before.set(pid, this.bindings.transportsOf(pid));
     this.bindings.replaceFromSnapshot(snapshot);
+    this.bounceLostMedia(before);
     const live = new Map<string, Snapshot["producers"][number]>();
     for (const p of snapshot.producers) {
       if (p.meta && p.meta.origin !== "pipe" && p.meta.trackId) live.set(p.meta.trackId, p);
@@ -1001,6 +1018,25 @@ export class RoomController {
     }
     this.deps.checkpoint.schedule();
     this.armIdle();
+  }
+
+  /**
+   * A snapshot that no longer carries a transport a participant had (the SFU lost the room or
+   * the transport) leaves their socket attached to dead media. Close it like a dropped
+   * connection: the client re-hellos, and the resume rebuilds the transports and answers resync.
+   */
+  private bounceLostMedia(before: Map<string, Transports>): void {
+    for (const [pid, had] of before) {
+      const now = this.bindings.transportsOf(pid);
+      const lost =
+        (had.send !== undefined && now.send?.id !== had.send.id) ||
+        (had.recv !== undefined && now.recv?.id !== had.recv.id);
+      const link = this.links.get(pid);
+      if (!lost || !link) continue;
+      this.deps.log.warn({ sessionId: this.sessionId, participantId: pid }, "media reset");
+      link.close(1012, "media reset, reconnect");
+      this.detach(link, pid);
+    }
   }
 
   private onStatsEvent(event: StatsEvent): void {

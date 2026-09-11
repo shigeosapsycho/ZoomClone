@@ -197,6 +197,32 @@ describe("gateway: sessions", () => {
     expect((await fetch(`${signaling.httpUrl}/nope`)).status).toBe(404);
   });
 
+  it("runs one frame at a time per connection, so two subscribes for one track create one consumer", async () => {
+    const host = await joined({ participant_id: HOST, role: "host" });
+    const ann = await joined({ participant_id: A });
+    await ann.request("publish", {
+      kind: "video",
+      source: "camera",
+      rtp_parameters: { codecs: [] },
+      paused: false,
+    });
+    await host.waitFor("track.added", (m) => m.payload.track.track_id === "trk1");
+    const payload = { rtp_capabilities: { codecs: [] }, track_ids: ["trk1"], prefs: {} };
+    // Both frames are on the wire before the first Subscribe round trip completes.
+    const [first, second] = await Promise.all([
+      host.request("subscribe", payload),
+      host.request("subscribe", payload),
+    ]);
+    expect(first).toMatchObject({
+      type: "ack",
+      payload: { consumers: [{ track_id: "trk1", consumer_id: "c1" }], removed: [] },
+    });
+    expect(second).toMatchObject({ type: "ack", payload: { consumers: [], removed: [] } });
+    expect(sfu.room(sessionId)?.consumers.size).toBe(1);
+    const lastTwoAcks = host.ofType("ack").slice(-2);
+    expect(lastTwoAcks.map((m) => m.id)).toEqual([first.id, second.id]);
+  });
+
   it("limits reactions per connection and closes silent sockets with 4000", async () => {
     // A second server with a short ping timeout; the shared one keeps the default so other tests
     // are not cut off mid-flow.
