@@ -295,6 +295,15 @@ describe("Sfu gRPC service", () => {
     expect(snapshot.transports.map((t) => t.transportId).sort()).toEqual(
       [send.transportId, recv.transportId].sort(),
     );
+    const firstTransport = snapshot.transports[0];
+    if (!firstTransport) throw new Error("expected a transport in the snapshot");
+    expect(JSON.parse(firstTransport.iceParametersJson)).toMatchObject({
+      usernameFragment: expect.any(String),
+    });
+    expect(JSON.parse(firstTransport.iceCandidatesJson)).toBeInstanceOf(Array);
+    expect(JSON.parse(firstTransport.dtlsParametersJson)).toMatchObject({
+      fingerprints: expect.any(Array),
+    });
     expect(snapshot.producers[0]).toMatchObject({
       producerId: pub.producerId,
       paused: true,

@@ -99,6 +99,9 @@ function snapshotToProto(snapshot: RoomSnapshot): StatsEventInit["event"] {
         direction: directionToProto(t.direction),
         iceState: t.iceState,
         dtlsState: t.dtlsState,
+        iceParametersJson: JSON.stringify(t.iceParameters),
+        iceCandidatesJson: JSON.stringify(t.iceCandidates),
+        dtlsParametersJson: JSON.stringify(t.dtlsParameters),
       })),
       producers: snapshot.producers.map((p) => ({
         producerId: p.producerId,

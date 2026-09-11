@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ClientMessageSchema,
+  HelloAckSchema,
   ServerMessageSchema,
   SubscribeAckSchema,
   WelcomeSchema,
@@ -195,6 +196,17 @@ describe("ServerMessageSchema", () => {
       const result = ServerMessageSchema.safeParse({ type, seq: 7, payload });
       expect(result.success, `${type}: ${JSON.stringify(result.error)}`).toBe(true);
     }
+  });
+
+  it("accepts lobby.left and the hello ack payload", () => {
+    const left = ServerMessageSchema.safeParse({
+      type: "lobby.left",
+      seq: 7,
+      payload: { participant_id: "0f1b6c2e-8d5a-4e2b-9c1d-2b3a4c5d6e7f" },
+    });
+    expect(left.success).toBe(true);
+    expect(HelloAckSchema.safeParse({ mode: "replay", epoch: 2, seq: 40 }).success).toBe(true);
+    expect(HelloAckSchema.safeParse({ mode: "nope", epoch: 2, seq: 40 }).success).toBe(false);
   });
 
   it("SubscribeAckSchema carries consumer params", () => {

@@ -192,6 +192,11 @@ message TransportSnapshot {
   TransportDirection direction = 3;
   string ice_state = 4;
   string dtls_state = 5;
+  // Full client-facing parameters, so a restarted room controller can hand a reconnecting
+  // client its existing transports instead of recreating them.
+  string ice_parameters_json = 6;
+  string ice_candidates_json = 7;
+  string dtls_parameters_json = 8;
 }
 
 message ProducerSnapshot {

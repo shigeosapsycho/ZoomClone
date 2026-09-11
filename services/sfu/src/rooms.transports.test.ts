@@ -159,6 +159,9 @@ describe("Room transports", () => {
       iceState: "new",
       dtlsState: "new",
     });
+    expect(snap.transports[0]?.iceParameters.usernameFragment).toBeTypeOf("string");
+    expect(snap.transports[0]?.iceCandidates.length).toBeGreaterThan(0);
+    expect(snap.transports[0]?.dtlsParameters.fingerprints.length).toBeGreaterThan(0);
     const events: unknown[] = [];
     const reader = (async () => {
       for await (const e of room.events()) events.push(e);

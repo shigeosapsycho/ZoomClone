@@ -162,7 +162,7 @@ Client -> server:
 
 | Type | Payload | Ack payload |
 | --- | --- | --- |
-| `hello` | `{token, resume_seq?, epoch?}` | (push: `welcome` or `resync`) |
+| `hello` | `{token, resume_seq?, epoch?}` | `{mode: welcome \| resync \| replay, epoch, seq}`, then push `welcome`, `resync` or the replayed events |
 | `connect_transport` | `{transport: "send" \| "recv", dtls_parameters}` | `{}` |
 | `publish` | `{kind: audio \| video, source: mic \| camera \| screen \| screen_audio, rtp_parameters, paused?}` | `{track_id}` (server-minted) |
 | `unpublish` | `{track_id}` | `{}` |
@@ -179,13 +179,15 @@ Client -> server:
 | `restart_ice` | reserved name, returns `error NOT_IMPLEMENTED` in MVP | |
 | `ping` | `{ts}` every 10 s, 3 missed -> close 4000 | push `pong {ts}` |
 
-Server -> client pushes (seq'd, replayable): `welcome`, `resync`, `participant.joined/.left/
-.updated` (`connected`, `muted`, `video_off`, `hand`, `role`), `track.added/.removed/.updated`
-(`paused`, `layers`), `active_speakers {participant_ids}`, `lobby.request {participant_id, name}`
-(hosts), `lobby.result {admitted}` (waiter), `chat`, `reaction`, `hand`, `room.updated {locked?,
-recording?}`, `room.ended {reason}`. `ack`, `error`, `pong` are not seq'd. Fanout targets are
-resolved by a function over the roster (`all`, `hosts`, `participant`, `all_except`), so group
-targets for breakouts are an addition later.
+Server -> client pushes (seq'd, replayable): `welcome`, `resync`,
+`participant.joined/.left/.updated` (`connected`, `muted`, `video_off`, `hand`, `role`),
+`track.added/.removed/.updated` (`paused` to everyone; `layers` only to the subscriber it concerns:
+spatial layers being delivered, 0 none, 1 low, 2 medium, 3 high), `active_speakers
+{participant_ids}`, `lobby.request {participant_id, name}` (hosts), `lobby.result {admitted}`
+(waiter), `lobby.left {participant_id}` (hosts, when a waiter is denied or disconnects), `chat`,
+`reaction`, `hand`, `room.updated {locked?, recording?}`, `room.ended {reason}`. `ack`, `error`,
+`pong` are not seq'd. Fanout targets are resolved by a function over the roster (`all`, `hosts`,
+`participant`, `all_except`), so group targets for breakouts are an addition later.
 
 Exactly one `welcome` per connection: `{participant_id, role, epoch, seq, state: "joined" | "lobby",
 roster?, tracks?, lobby?, room_meta?, media?}`. `state: "lobby"` carries only the ids. `lobby`
@@ -195,14 +197,16 @@ waiter receives `lobby.result {admitted: true}` then a `resync` with the full sn
 on deny `lobby.result {admitted: false}` then close 4003. Lobby waiters also receive `room.ended`.
 Waiters count as activity for the idle timer.
 
-Reconnect: `hello {resume_seq, epoch}` within the 30 s grace, with matching epoch, replays events
-targeted to that participant with `seq > resume_seq` from the ring buffer (last 500 events or
-60 s); otherwise `resync`. `epoch` increments on every fresh create or rehydrate, because the
-write-behind checkpoint can lag the live `seq` by up to 50 ms and a restarted controller could
-otherwise reissue numbers clients already saw. A newer connection for the same participant closes
-the older one (4005) without starting the grace timer. Media transports are untouched by signaling
-reconnect. After `resync`, the client compares transport ids with its own and rebuilds transports
-if they changed (SFU room was recreated).
+Reconnect: `hello {resume_seq, epoch}` within the 30 s grace, with matching epoch, replays
+events targeted to that participant with `seq > resume_seq` from the ring buffer (last 500
+events or 60 s); otherwise `resync`. `epoch` increments on every fresh create or rehydrate,
+because the write-behind checkpoint can lag the live `seq` by up to 50 ms and a restarted
+controller could otherwise reissue numbers clients already saw. A newer connection for the same
+participant closes the older one (4005) without starting the grace timer. Media transports are
+untouched by signaling reconnect. After `resync`, the client compares transport ids with its
+own and rebuilds transports if they changed (SFU room was recreated). Lobby waiters have no
+grace: a waiter whose socket closes leaves the lobby at once (hosts receive `lobby.left`) and
+re-requests on the next `hello`.
 
 `departed` map (checkpointed): participant_id -> reason. A `hello` for a departed participant
 closes with the matching code: 4002 removed by host, 4003 lobby denied, 4008 grace expired
@@ -242,18 +246,19 @@ Stats(session_id) -> stream StatsEvent
 ```
 
 `StatsEvent` oneof: `snapshot` (always first: transports with `direction`, `ice_state`,
-`dtls_state`; producers with `paused`, `layer_count`; consumers with `preferred_layers`,
-`current_layers`, `priority`, `paused`, `producer_paused`; every entity carries its appData
-`{sfu_id, session_id, participant_id, track_id, kind, source, origin: local | pipe}`),
-`dominant_speakers` (every 300 ms, `[{participant_id, volume}]`), `silence`, `consumer_layers`
-(on `layerschange`), `producer_score`, `producer_closed`, `consumer_closed`, `ice_state`,
-`transport_closed`, `qos` (per transport every `SFU_QOS_INTERVAL_MS`, default 5000: bytes, rtt,
-loss; logged only in MVP). mediasoup blobs travel as JSON strings; ids and enums are typed
-fields. Error mapping: unknown ids `NOT_FOUND`; wrong room `PERMISSION_DENIED`; wrong transport
-direction or incompatible capabilities `FAILED_PRECONDITION` (Subscribe only needs the recv
-transport to exist; mediasoup-client connects it on the first consume); mediasoup errors
-`INTERNAL` with message. `room_closed` is internal to the SFU; the stream simply ends when the
-room closes.
+`dtls_state` and their full client parameters (`ice_parameters`, `ice_candidates`,
+`dtls_parameters` as JSON) so a rehydrated controller can reuse them; producers with `paused`,
+`layer_count`; consumers with `preferred_layers`, `current_layers`, `priority`, `paused`,
+`producer_paused`; every entity carries its appData `{sfu_id, session_id, participant_id, track_id,
+kind, source, origin: local | pipe}`), `dominant_speakers` (every 300 ms, `[{participant_id,
+volume}]`), `silence`, `consumer_layers` (on `layerschange`), `producer_score`, `producer_closed`,
+`consumer_closed`, `ice_state`, `transport_closed`, `qos` (per transport every
+`SFU_QOS_INTERVAL_MS`, default 5000: bytes, rtt, loss; logged only in MVP). mediasoup blobs travel
+as JSON strings; ids and enums are typed fields. Error mapping: unknown ids `NOT_FOUND`; wrong room
+`PERMISSION_DENIED`; wrong transport direction or incompatible capabilities `FAILED_PRECONDITION`
+(Subscribe only needs the recv transport to exist; mediasoup-client connects it on the first
+consume); mediasoup errors `INTERNAL` with message. `room_closed` is internal to the SFU; the
+stream simply ends when the room closes.
 
 ## Components
 

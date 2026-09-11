@@ -3,7 +3,7 @@ import type { Role } from "@zoomclone/protocol";
 
 /** Typed payloads. Names mirror the spec 4.4 Kafka topics (see topicFor). */
 export type EventMap = {
-  "room.created": { session_id: string; meeting_id: string; home_sfu: string; epoch: number };
+  "room.created": { session_id: string; home_sfu: string; epoch: number };
   "session.ended": { session_id: string; reason: string; peak_participants: number };
   "host.action": { session_id: string; actor_id: string; action: string; target_id?: string };
   "participant.joined": {

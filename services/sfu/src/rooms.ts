@@ -62,6 +62,9 @@ export type RoomSnapshot = {
     direction: Direction;
     iceState: string;
     dtlsState: string;
+    iceParameters: ms.IceParameters;
+    iceCandidates: ms.IceCandidate[];
+    dtlsParameters: ms.DtlsParameters;
   }>;
   producers: Array<{
     producerId: string;
@@ -412,6 +415,9 @@ export class Room {
         direction: t.direction,
         iceState: t.transport.iceState,
         dtlsState: t.transport.dtlsState,
+        iceParameters: t.transport.iceParameters,
+        iceCandidates: t.transport.iceCandidates,
+        dtlsParameters: t.transport.dtlsParameters,
       })),
       producers: [...this.producers].map(([producerId, p]) => ({
         producerId,

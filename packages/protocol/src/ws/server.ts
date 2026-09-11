@@ -28,6 +28,14 @@ export const WelcomeSchema = z.object({
 });
 export type Welcome = z.infer<typeof WelcomeSchema>;
 
+/** Reply to hello, sent before the welcome / resync snapshot or the replayed events. */
+export const HelloAckSchema = z.object({
+  mode: z.enum(["welcome", "resync", "replay"]),
+  epoch: z.number().int().positive(),
+  seq: z.number().int().nonnegative(),
+});
+export type HelloAck = z.infer<typeof HelloAckSchema>;
+
 function event<T extends string, P extends z.ZodType>(type: T, payload: P) {
   return z.object({ type: z.literal(type), seq: z.number().int().positive(), payload });
 }
@@ -77,6 +85,7 @@ export const ServerMessageSchema = z.discriminatedUnion("type", [
   event("active_speakers", z.object({ participant_ids: z.array(ParticipantIdSchema) })),
   event("lobby.request", z.object({ participant_id: ParticipantIdSchema, name: z.string() })),
   event("lobby.result", z.object({ admitted: z.boolean() })),
+  event("lobby.left", z.object({ participant_id: ParticipantIdSchema })),
   event(
     "chat",
     z.object({

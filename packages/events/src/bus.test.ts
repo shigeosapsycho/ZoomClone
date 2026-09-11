@@ -53,14 +53,12 @@ describe("InMemoryEventBus", () => {
     });
     bus.publish("room.created", sid, {
       session_id: sid,
-      meeting_id: sid,
       home_sfu: "sfu-1",
       epoch: 1,
     });
     off();
     bus.publish("room.created", sid, {
       session_id: sid,
-      meeting_id: sid,
       home_sfu: "sfu-1",
       epoch: 2,
     });
