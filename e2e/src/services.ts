@@ -152,14 +152,23 @@ function minimalEnv(): Record<string, string> {
 function h2Healthy(baseUrl: string): Promise<boolean> {
   return new Promise((resolve) => {
     const session = http2.connect(baseUrl);
-    session.on("error", () => resolve(false));
+    // A listener that never speaks HTTP/2 would otherwise hang the poll for good.
+    const giveUp = setTimeout(() => {
+      resolve(false);
+      session.destroy();
+    }, 2_000);
+    const settle = (healthy: boolean) => {
+      clearTimeout(giveUp);
+      resolve(healthy);
+    };
+    session.on("error", () => settle(false));
     const req = session.request({ ":path": "/healthz" });
     req.on("response", (headers) => {
-      resolve(headers[":status"] === 200);
+      settle(headers[":status"] === 200);
       req.close();
       session.close();
     });
-    req.on("error", () => resolve(false));
+    req.on("error", () => settle(false));
     req.end();
   });
 }
@@ -177,7 +186,11 @@ async function killTree(child: ChildProcess): Promise<void> {
     try {
       execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: "ignore" });
     } catch {
-      if (!exited(child)) child.kill("SIGKILL");
+      try {
+        if (!exited(child)) child.kill("SIGKILL");
+      } catch {
+        // kill() of a process that is already gone: the exit event settles it.
+      }
     }
   } else {
     child.kill("SIGTERM");

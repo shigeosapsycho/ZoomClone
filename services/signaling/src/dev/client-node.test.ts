@@ -160,7 +160,7 @@ describe("SignalingClient", () => {
     expect(first.consumers.map((c) => c.track_id)).toEqual([trackId]);
     const firstConsumer = first.consumers[0]!.consumer_id;
 
-    // The socket goes before the ack would have landed; the server keeps the binding.
+    // The socket goes after the subscribe was applied; the server keeps the binding across the drop.
     ann.client.drop();
     await waitFor(() => ann.client.lastAck?.mode === "replay");
     // Declarative full set: an existing binding gets its prefs updated and is not echoed back...
