@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { Server } from "node:http";
+import type { IncomingMessage, Server } from "node:http";
+import type { Duplex } from "node:stream";
 import type { Logger } from "pino";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
@@ -27,6 +28,37 @@ export type GatewayDeps = {
 
 const ROOM_PATH = /^\/rooms\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const MAX_FRAME_BYTES = 64 * 1024;
+const TERMINATE_AFTER_MS = 1000;
+
+/**
+ * The request path, or null when Node's parser accepted a request target the URL parser rejects
+ * (for example `GET http://[ HTTP/1.1`). Throwing inside a request or upgrade listener would be
+ * an uncaught exception, so callers answer 400 instead.
+ */
+export function pathnameOf(req: IncomingMessage): string | null {
+  return URL.parse(req.url ?? "/", "http://localhost")?.pathname ?? null;
+}
+
+/**
+ * Refuses an upgrade the way ws's abortHandshake does: end the socket so backpressure cannot
+ * cancel the status line, destroy once it is flushed. The http server detached its own error
+ * listener before emitting "upgrade", so a reset from the peer needs one here.
+ */
+function refuseUpgrade(socket: Duplex, status: string): void {
+  socket.on("error", () => socket.destroy());
+  socket.once("finish", () => socket.destroy());
+  socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`);
+}
+
+/**
+ * A peer that stopped reading never answers the close frame; ws would hold the socket, its
+ * buffer and the connection gauge slot for its 30 s close timeout. Drop it after a second.
+ */
+function terminateUnlessClosed(socket: WebSocket): void {
+  setTimeout(() => {
+    if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+  }, TERMINATE_AFTER_MS).unref();
+}
 
 /** The controller-facing wrapper around one socket. */
 export class WsLink implements ParticipantLink {
@@ -46,6 +78,7 @@ export class WsLink implements ParticipantLink {
         "slow consumer, closing",
       );
       this.socket.close(1008, "slow consumer");
+      terminateUnlessClosed(this.socket);
       return;
     }
     this.socket.send(JSON.stringify(message));
@@ -65,14 +98,18 @@ export class WsLink implements ParticipantLink {
 export function attachGateway(server: Server, deps: GatewayDeps): WebSocketServer {
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
   server.on("upgrade", (req, socket, head) => {
-    const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
-    const match = ROOM_PATH.exec(pathname);
-    if (!match) {
-      socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
-      socket.destroy();
+    const pathname = pathnameOf(req);
+    if (pathname === null) {
+      refuseUpgrade(socket, "400 Bad Request");
       return;
     }
-    const sessionId = match[1]!;
+    const match = ROOM_PATH.exec(pathname);
+    if (!match) {
+      refuseUpgrade(socket, "404 Not Found");
+      return;
+    }
+    // The claims compare byte for byte; a mixed-case URL must not fail as a session mismatch.
+    const sessionId = match[1]!.toLowerCase();
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit("connection", ws, req);
       new Connection(ws, sessionId, deps);
@@ -106,8 +143,11 @@ class Connection {
     // Three missed pings (design doc): checked a few times per timeout window.
     this.pingWatchdog = setInterval(
       () => {
+        // Once the close is issued the socket is CLOSING; fire the timeout exactly once.
+        if (ws.readyState !== WebSocket.OPEN) return;
         if (Date.now() - this.lastPingAt > deps.env.PING_TIMEOUT_MS) {
           this.link.close(CloseCode.PING_TIMEOUT, "ping timeout");
+          terminateUnlessClosed(ws);
         }
       },
       Math.max(50, Math.floor(deps.env.PING_TIMEOUT_MS / 3)),
@@ -182,6 +222,8 @@ class Connection {
         id: message.id,
         payload: { code: "INTERNAL", message: "internal error" },
       });
+      // A hello that blew up leaves no participant behind it; the socket must not idle open.
+      if (this.participantId === null) this.link.close(1011, "internal error");
     }
   }
 
@@ -245,8 +287,12 @@ class Connection {
     const hello: HelloPayload = { id: message.id };
     if (message.payload.resume_seq !== undefined) hello.resume_seq = message.payload.resume_seq;
     if (message.payload.epoch !== undefined) hello.epoch = message.payload.epoch;
-    const participantId = await controller.attach(this.link, claims, hello);
-    this.attaching = false;
+    let participantId: string | null;
+    try {
+      participantId = await controller.attach(this.link, claims, hello);
+    } finally {
+      this.attaching = false;
+    }
     if (participantId === null) return;
     this.controller = controller;
     this.participantId = participantId;

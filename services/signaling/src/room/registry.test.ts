@@ -123,6 +123,14 @@ describe("RoomRegistry", () => {
     expect(await infra.redis.exists(roomKeys(sessionId).owner)).toBe(0);
   });
 
+  it("answers ControllerBusyError once closeAll has started, so clients retry elsewhere", async () => {
+    const { sessionId } = await seedSession(infra.db);
+    const r = registry();
+    await r.closeAll();
+    await expect(r.get(sessionId, SEED)).rejects.toBeInstanceOf(ControllerBusyError);
+    expect(r.size).toBe(0);
+  });
+
   it("ends the room on a ctl end command and drops it from the registry", async () => {
     const { meetingId, sessionId } = await seedSession(infra.db);
     const r = registry();

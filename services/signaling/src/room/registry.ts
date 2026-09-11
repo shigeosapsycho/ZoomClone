@@ -78,7 +78,9 @@ export class RoomRegistry {
     if (existing) return Promise.resolve(existing);
     const inflight = this.pending.get(sessionId);
     if (inflight) return inflight;
-    if (this.closing) return Promise.reject(new Error("registry is closing"));
+    // Shutting down: the room is about to belong to another process, so the gateway answers
+    // CONTROLLER_BUSY + 1013 and the client retries there instead of seeing INTERNAL + 1011.
+    if (this.closing) return Promise.reject(new ControllerBusyError(sessionId));
     const promise = this.build(sessionId, seed).finally(() => this.pending.delete(sessionId));
     this.pending.set(sessionId, promise);
     return promise;

@@ -1,3 +1,4 @@
+import { createConnection } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { CloseCode, type SignalingClaims } from "@zoomclone/protocol";
@@ -60,6 +61,31 @@ async function joined(overrides: Partial<SignalingClaims> & { participant_id: st
   return client;
 }
 
+/**
+ * Sends one raw request whose target Node's parser accepts but the URL parser rejects, and
+ * resolves with whatever the server answered once it closes the socket (or after 500 ms).
+ */
+function rawRequest(httpUrl: string, headers: string[]): Promise<string> {
+  const { hostname, port } = new URL(httpUrl);
+  return new Promise((resolve) => {
+    let response = "";
+    const socket = createConnection({ host: hostname, port: Number(port) }, () => {
+      socket.write(["GET http://[ HTTP/1.1", "Host: x", ...headers, "", ""].join("\r\n"));
+    });
+    const done = () => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(response);
+    };
+    const timer = setTimeout(done, 500);
+    socket.on("data", (chunk: Buffer) => {
+      response += chunk.toString();
+    });
+    socket.on("close", done);
+    socket.on("error", done);
+  });
+}
+
 describe("gateway: handshake", () => {
   it("closes 4006 without a hello in time, or when the first frame is not a hello", async () => {
     const silent = await connect();
@@ -88,6 +114,14 @@ describe("gateway: handshake", () => {
     await expect(TestClient.connect(`${signaling.url}/nope`)).rejects.toThrow(
       /upgrade failed: 404/,
     );
+  });
+
+  it("answers 400 and stays up when the request target defeats the URL parser, on both paths", async () => {
+    expect(await rawRequest(signaling.httpUrl, ["Connection: close"])).toMatch(/^HTTP\/1\.1 400 /);
+    expect((await fetch(`${signaling.httpUrl}/healthz`)).status).toBe(200);
+    const upgrade = ["Connection: Upgrade", "Upgrade: websocket"];
+    expect(await rawRequest(signaling.httpUrl, upgrade)).toMatch(/^HTTP\/1\.1 400 /);
+    expect((await fetch(`${signaling.httpUrl}/healthz`)).status).toBe(200);
   });
 
   it("answers CONTROLLER_BUSY and closes 1013 while another controller owns the room", async () => {
@@ -175,6 +209,9 @@ describe("gateway: sessions", () => {
         mintClaims({ session_id: sessionId, participant_id: A }),
       );
       expect((await ann.request("hello", { token })).type).toBe("ack");
+      // The silence window starts after room creation, not during it.
+      ann.send({ type: "ping", id: "p", payload: { ts: 1 } });
+      await ann.waitFor("pong");
       const replies = [];
       for (let i = 0; i < 4; i++) replies.push(await ann.request("reaction", { emoji: "clap" }));
       expect(replies.map((r) => r.type)).toEqual(["ack", "ack", "error", "error"]);

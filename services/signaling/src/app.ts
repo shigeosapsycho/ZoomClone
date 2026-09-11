@@ -2,7 +2,7 @@ import * as http from "node:http";
 import type { Logger } from "pino";
 import type { WebSocketServer } from "ws";
 import type { Env } from "./env";
-import { attachGateway } from "./gateway/server";
+import { attachGateway, pathnameOf } from "./gateway/server";
 import type { TokenVerifier } from "./gateway/auth";
 import type { Metrics } from "./metrics";
 import type { RoomRegistry } from "./room/registry";
@@ -18,7 +18,12 @@ export type AppDeps = {
 /** Plain http for /healthz and /metrics; WebSocket upgrades on /rooms/:session_id. */
 export function createApp(deps: AppDeps): { server: http.Server; wss: WebSocketServer } {
   const server = http.createServer((req, res) => {
-    const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    const pathname = pathnameOf(req);
+    if (pathname === null) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { code: "VALIDATION", message: "invalid request target" } }));
+      return;
+    }
     if (pathname === "/healthz") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, rooms: deps.registry.size }));
