@@ -15,15 +15,23 @@ const bus = new InMemoryEventBus((error, event) => {
 });
 const app = await buildApp(createDeps(env, { db, redis, bus, keys }));
 
+let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
   app.log.info({ signal }, "shutting down");
-  await app.close();
-  await redis.quit();
-  await db.end();
-  process.exit(0);
+  try {
+    await app.close();
+    await redis.quit();
+    await db.end();
+    process.exit(0);
+  } catch (error) {
+    app.log.error(error, "shutdown failed");
+    process.exit(1);
+  }
 }
-process.once("SIGINT", () => void shutdown("SIGINT"));
-process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 await app.listen({ port: env.MEETING_API_PORT, host: "0.0.0.0" });
 app.log.info({ devIssuer: env.AUTH_DEV_ISSUER, kid: keys.kid }, "meeting-api listening");
