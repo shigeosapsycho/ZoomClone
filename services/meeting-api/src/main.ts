@@ -5,6 +5,7 @@ import { loadSigningKeys } from "@zoomclone/tokens";
 import { buildApp } from "./app";
 import { createDeps } from "./deps";
 import { loadEnv } from "./env";
+import { startSweeper } from "./rate-limit";
 
 const env = loadEnv();
 const db = createDb(env.DATABASE_URL);
@@ -13,7 +14,9 @@ const keys = await loadSigningKeys({ pem: env.SIGNING_KEY_PEM, kid: env.SIGNING_
 const bus = new InMemoryEventBus((error, event) => {
   console.error(`event handler failed for ${event.type}`, error);
 });
-const app = await buildApp(createDeps(env, { db, redis, bus, keys }));
+const deps = createDeps(env, { db, redis, bus, keys });
+const app = await buildApp(deps);
+const stopSweeper = startSweeper([deps.limiters.ip, deps.limiters.code], env.JOIN_RATE_WINDOW_MS);
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
@@ -21,6 +24,7 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   app.log.info({ signal }, "shutting down");
   try {
+    stopSweeper();
     await app.close();
     await redis.quit();
     await db.end();

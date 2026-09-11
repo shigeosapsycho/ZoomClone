@@ -9,7 +9,7 @@ import { JoinService } from "./join/service";
 import { createMetrics, type Metrics } from "./metrics";
 import { MeetingsRepo } from "./meetings/repo";
 import { MeetingsService } from "./meetings/service";
-import { SlidingWindowLimiter, type RateLimiter } from "./rate-limit";
+import { SlidingWindowLimiter } from "./rate-limit";
 import { RedisRoomControl, type RoomControl } from "./room-control";
 import { RoomStateReader } from "./room-state";
 import { StaticScheduler, type Scheduler } from "./scheduler";
@@ -38,7 +38,7 @@ export type AppDeps = {
   meetings: MeetingsService;
   scheduler: Scheduler;
   roomState: RoomStateReader;
-  limiters: { ip: RateLimiter; code: RateLimiter };
+  limiters: { ip: SlidingWindowLimiter; code: SlidingWindowLimiter };
   join: JoinService;
 };
 

@@ -34,4 +34,17 @@ export class SlidingWindowLimiter implements RateLimiter {
       if (!times.some((t) => t > cutoff)) this.hits.delete(key);
     }
   }
+
+  get size(): number {
+    return this.hits.size;
+  }
+}
+
+/** Sweeps every limiter on an interval that never keeps the process alive. Returns a stop function. */
+export function startSweeper(limiters: SlidingWindowLimiter[], intervalMs: number): () => void {
+  const timer = setInterval(() => {
+    for (const limiter of limiters) limiter.sweep();
+  }, intervalMs);
+  timer.unref();
+  return () => clearInterval(timer);
 }

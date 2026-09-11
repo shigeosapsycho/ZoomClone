@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { SlidingWindowLimiter } from "./rate-limit";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SlidingWindowLimiter, startSweeper } from "./rate-limit";
 
 describe("SlidingWindowLimiter", () => {
   it("allows `limit` hits per window then blocks with a retry-after", () => {
@@ -28,5 +28,29 @@ describe("SlidingWindowLimiter", () => {
     expect(limiter.hit("a", 1).allowed).toBe(false);
     limiter.sweep(20_000);
     expect(limiter.hit("a", 20_001).allowed).toBe(true);
+  });
+});
+
+describe("startSweeper", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("sweeps every limiter on an interval until stopped", () => {
+    vi.useFakeTimers();
+    const a = new SlidingWindowLimiter(10, 10_000);
+    const b = new SlidingWindowLimiter(10, 10_000);
+    a.hit("key", 0);
+    b.hit("key", 0);
+    expect(a.size).toBe(1);
+    expect(b.size).toBe(1);
+
+    const stop = startSweeper([a, b], 10_000);
+    vi.advanceTimersByTime(20_000);
+    expect(a.size).toBe(0);
+    expect(b.size).toBe(0);
+
+    stop();
+    vi.useRealTimers();
   });
 });
