@@ -145,7 +145,8 @@ async function killTree(child: ChildProcess): Promise<void> {
     execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: "ignore" });
   } else {
     child.kill("SIGTERM");
-    setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
+    const escalate = setTimeout(() => child.kill("SIGKILL"), 5_000);
+    child.once("exit", () => clearTimeout(escalate));
   }
   await exited;
 }

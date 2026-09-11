@@ -17,9 +17,15 @@ test("host mute, remove, lock and end", async ({ browser, api, services }) => {
     ]);
     for (const g of [host, ann, bob]) await g.waitJoined();
     const annId = await ann.participantId();
-    const annAudio = (
-      await bob.harness((h) => h.view().tracks.filter((t) => t.kind === "audio"))
-    ).find((t) => t.owner === annId)!.track_id;
+    // Bob's copy of Ann's track arrives by fanout, a beat after his own welcome.
+    const bobAudioTracks = () =>
+      bob.harness((h) => h.view().tracks.filter((t) => t.kind === "audio"));
+    await expect
+      .poll(async () => (await bobAudioTracks()).some((t) => t.owner === annId), {
+        timeout: 30_000,
+      })
+      .toBe(true);
+    const annAudio = (await bobAudioTracks()).find((t) => t.owner === annId)!.track_id;
     await expect.poll(() => bob.packetsDelta(annAudio), { timeout: 30_000 }).toBeGreaterThan(0);
 
     // mute: Ann's mic goes quiet for Bob and her tile says so

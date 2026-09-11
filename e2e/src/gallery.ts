@@ -182,7 +182,10 @@ export async function openGallery(
 export async function helloCloseCode(signalingUrl: string, token: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(signalingUrl);
-    const timer = setTimeout(() => reject(new Error("no close within 10 s")), 10_000);
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error("no close within 10 s"));
+    }, 10_000);
     ws.addEventListener("open", () =>
       ws.send(JSON.stringify({ type: "hello", id: "h", payload: { token } })),
     );
