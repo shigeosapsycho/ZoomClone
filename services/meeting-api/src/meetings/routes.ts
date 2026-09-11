@@ -48,10 +48,11 @@ export const meetingRoutes: FastifyPluginAsync = async (app) => {
     return reply.status(204).send();
   });
 
-  // find-my-way only stops a parametric name at "." "-" "(" "/" or end of string, so a bare
-  // ":id::end" reads as one param literally named "id::end" that swallows the ":end" too. The
-  // regex constraint forces the name to end at "id"; "::" then escapes the literal colon in the
-  // static ending, matching /v1/meetings/<uuid>:end with a clean req.params.id.
+  // find-my-way needs a regex-constrained param to put a literal colon right after a parameter:
+  // a bare ":id::end" reads as one param literally named "id::end" that swallows the ":end"
+  // value too, since only "." "-" "(" "/" or end of string end a parametric name. "(^[^:/]+)"
+  // ends the "id" param there, so the "::" that follows is then read as an escaped literal
+  // colon, matching /v1/meetings/<uuid>:end with a clean req.params.id.
   r.post(
     "/meetings/:id(^[^:/]+)::end",
     { schema: { params: IdParamsSchema, response: { 200: EndMeetingResponseSchema } } },
