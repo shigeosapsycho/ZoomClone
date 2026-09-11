@@ -19,6 +19,9 @@ service SfuService {
   rpc Unsubscribe(UnsubscribeRequest) returns (UnsubscribeResponse);
   rpc SetLayer(SetLayerRequest) returns (SetLayerResponse);
   rpc Cascade(CascadeRequest) returns (CascadeResponse);
+  // Snapshot first, then events. The stream ends without an error when the room closes, when the
+  // SFU shuts down, or when the subscriber falls more than 4096 events behind; reopen
+  // (AllocateRoom then Stats) and treat the new snapshot as the truth.
   rpc Stats(StatsRequest) returns (stream StatsEvent);
 }
 

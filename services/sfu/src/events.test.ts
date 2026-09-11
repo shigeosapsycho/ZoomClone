@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EventQueue } from "./events";
+import { EventQueue, MAX_QUEUED_EVENTS } from "./events";
 
 async function collect<T>(iter: AsyncIterable<T>, max: number): Promise<T[]> {
   const out: T[] = [];
@@ -42,6 +42,25 @@ describe("EventQueue", () => {
     controller.abort();
     q.push(2);
     expect(await drained).toEqual([1]);
+    expect(q.ended).toBe(true);
+  });
+
+  it("drops the backlog and ends when a subscriber falls more than maxSize behind", async () => {
+    let overflows = 0;
+    const q = new EventQueue<number>({ maxSize: 3, onOverflow: () => overflows++ });
+    for (let i = 0; i < 4; i++) q.push(i);
+    expect(overflows).toBe(1);
+    expect(q.ended).toBe(true);
+    q.push(99);
+    expect(overflows).toBe(1);
+    expect(await collect(q.drain(), 10)).toEqual([]);
+  });
+
+  it("defaults the cap to MAX_QUEUED_EVENTS", () => {
+    const q = new EventQueue<number>();
+    for (let i = 0; i < MAX_QUEUED_EVENTS; i++) q.push(i);
+    expect(q.ended).toBe(false);
+    q.push(MAX_QUEUED_EVENTS);
     expect(q.ended).toBe(true);
   });
 });

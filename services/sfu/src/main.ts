@@ -12,7 +12,7 @@ const log = pino(
     : { level: env.LOG_LEVEL },
 );
 const slots = await createWorkers(env);
-const manager = new RoomManager(slots, roomOptionsFrom(env));
+const manager = new RoomManager(slots, roomOptionsFrom(env, log));
 const server = createSfuServer(manager, createMetrics(manager));
 
 let shuttingDown = false;

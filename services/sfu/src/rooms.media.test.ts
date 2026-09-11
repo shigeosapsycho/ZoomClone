@@ -1,9 +1,12 @@
+import type { types as ms } from "mediasoup";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   audioRtpParameters,
   createTestManager,
   videoSimulcastRtpParameters,
+  waitFor,
 } from "../test/helpers";
+import type { RoomEvent } from "./events";
 import type { Room, RoomManager } from "./rooms";
 
 let ctx: Awaited<ReturnType<typeof createTestManager>>;
@@ -110,9 +113,31 @@ describe("subscribe", () => {
     expect(entry.consumer.priority).toBe(20);
 
     await room.setProducerPaused(pub.producerId, true);
+    // The consumer learns of the pause from a worker notification that races the pause() reply.
+    await waitFor(() => entry.consumer.producerPaused);
     expect(
       room.snapshot().consumers.find((c) => c.consumerId === sub.consumerId)?.producerPaused,
     ).toBe(true);
+  });
+
+  it("rejects capabilities that cannot consume the producer as FAILED_PRECONDITION", async () => {
+    const pub = await room.publish(
+      "A",
+      sendA,
+      "video",
+      "camera",
+      videoSimulcastRtpParameters(),
+      false,
+    );
+    const routerCaps = room.router.rtpCapabilities;
+    const audioOnly: ms.RtpCapabilities = {
+      codecs: routerCaps.codecs?.filter((c) => c.mimeType === "audio/opus"),
+      headerExtensions: routerCaps.headerExtensions,
+    };
+    expect(audioOnly.codecs).toHaveLength(1);
+    await expect(room.subscribe("B", recvB, pub.producerId, audioOnly)).rejects.toMatchObject({
+      code: "FAILED_PRECONDITION",
+    });
   });
 
   it("rejects cross-room producers, unknown producers and send transports", async () => {
@@ -131,7 +156,7 @@ describe("subscribe", () => {
   });
 
   it("closes consumers when the producer goes away and emits both events", async () => {
-    const events: unknown[] = [];
+    const events: RoomEvent[] = [];
     const controller = new AbortController();
     const reader = (async () => {
       for await (const e of room.events(controller.signal)) events.push(e);
@@ -139,7 +164,8 @@ describe("subscribe", () => {
     const pub = await room.publish("A", sendA, "audio", "mic", audioRtpParameters(), false);
     const sub = await room.subscribe("B", recvB, pub.producerId, room.router.rtpCapabilities);
     await room.unpublish(pub.producerId);
-    await new Promise((r) => setTimeout(r, 20));
+    // producer_closed is emitted inline; consumer_closed follows the worker's producerclose.
+    await waitFor(() => events.some((e) => e.type === "consumer_closed"));
     expect(room.producers.has(pub.producerId)).toBe(false);
     expect(room.consumers.has(sub.consumerId)).toBe(false);
     expect(events).toContainEqual({
@@ -174,7 +200,7 @@ describe("subscribe", () => {
     const pub = await room.publish("C", sendC, "audio", "mic", audioRtpParameters(), false);
     const sub = await room.subscribe("B", recvB, pub.producerId, room.router.rtpCapabilities);
     await room.closeTransport(sendC);
-    await new Promise((r) => setTimeout(r, 20));
+    await waitFor(() => !room.consumers.has(sub.consumerId));
     expect(room.producers.has(pub.producerId)).toBe(false);
     expect(room.consumers.has(sub.consumerId)).toBe(false);
   });
@@ -207,5 +233,11 @@ describe("rollback", () => {
       room.subscribe("B", recvB, pub.producerId, room.router.rtpCapabilities, undefined, 0),
     ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
     expect(room.consumers.size).toBe(sizeBefore);
+    // The worker must agree: a consumer left alive but untracked would still show up in the dump.
+    const dump = await room.requireTransport(recvB).transport.dump();
+    const tracked = [...room.consumers.values()]
+      .filter((c) => c.transportId === recvB)
+      .map((c) => c.consumer.id);
+    expect([...dump.consumerIds].sort()).toEqual(tracked.sort());
   });
 });

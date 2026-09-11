@@ -10,7 +10,7 @@ import {
 import type { types as ms } from "mediasoup";
 import { SfuError, type SfuErrorCode } from "./errors";
 import type { RoomEvent } from "./events";
-import type { Direction, Kind, RoomManager, RoomSnapshot, Source } from "./rooms";
+import type { Direction, Kind, Room, RoomManager, RoomSnapshot, Source } from "./rooms";
 
 const CODE_MAP: Record<SfuErrorCode, Code> = {
   NOT_FOUND: Code.NotFound,
@@ -213,6 +213,15 @@ function unary<I, O>(fn: (req: I) => Promise<O>): (req: I) => Promise<O> {
   };
 }
 
+/** The streaming handler has no unary() wrapper, so its room lookup maps the error itself. */
+function requireRoom(manager: RoomManager, sessionId: string): Room {
+  try {
+    return manager.require(sessionId);
+  } catch (error) {
+    throw toConnectError(error);
+  }
+}
+
 export function sfuRoutes(manager: RoomManager): (router: ConnectRouter) => void {
   return (router) => {
     router.service(SfuService, {
@@ -328,14 +337,10 @@ export function sfuRoutes(manager: RoomManager): (router: ConnectRouter) => void
         throw new SfuError("UNIMPLEMENTED", "cascade arrives with the cross-region slice");
       }),
       async *stats(req, context) {
-        let room;
-        try {
-          room = manager.require(req.sessionId);
-        } catch (error) {
-          throw toConnectError(error);
-        }
-        yield { event: snapshotToProto(room.snapshot()) };
-        for await (const event of room.events(context.signal)) {
+        const room = requireRoom(manager, req.sessionId);
+        const { snapshot, events } = room.openStats(context.signal);
+        yield { event: snapshotToProto(snapshot) };
+        for await (const event of events) {
           if (event.type === "room_closed") return;
           const mapped = eventToProto(event);
           if (mapped) yield { event: mapped };

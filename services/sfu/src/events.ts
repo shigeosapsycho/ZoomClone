@@ -35,14 +35,41 @@ export type RoomEvent =
     }
   | { type: "room_closed" };
 
-/** One subscriber's buffer. push() never blocks the emitter; drain() yields in order until end(). */
+/** Buffered events per subscriber before the stream is cut; the proto's Stats comment quotes it. */
+export const MAX_QUEUED_EVENTS = 4096;
+
+export type EventQueueOptions = {
+  /** Backlog limit; the queue ends itself instead of growing past it. Default MAX_QUEUED_EVENTS. */
+  maxSize?: number;
+  /** Called once, when the limit is hit, before the queue ends. */
+  onOverflow?: () => void;
+};
+
+/**
+ * One subscriber's buffer. push() never blocks the emitter; drain() yields in order until end().
+ * A subscriber that falls more than maxSize behind loses its backlog and its stream ends cleanly,
+ * so it reopens and treats the fresh snapshot as the truth instead of consuming unbounded memory.
+ */
 export class EventQueue<T> {
   private readonly items: T[] = [];
+  private readonly maxSize: number;
+  private readonly onOverflow: (() => void) | undefined;
   private waiter: (() => void) | null = null;
   private done = false;
 
+  constructor({ maxSize = MAX_QUEUED_EVENTS, onOverflow }: EventQueueOptions = {}) {
+    this.maxSize = maxSize;
+    this.onOverflow = onOverflow;
+  }
+
   push(item: T): void {
     if (this.done) return;
+    if (this.items.length >= this.maxSize) {
+      this.items.length = 0;
+      this.onOverflow?.();
+      this.end();
+      return;
+    }
     this.items.push(item);
     this.wake();
   }

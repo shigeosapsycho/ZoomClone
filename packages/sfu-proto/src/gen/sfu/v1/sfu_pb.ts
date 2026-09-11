@@ -1410,6 +1410,10 @@ export const SfuService: GenService<{
     output: typeof CascadeResponseSchema;
   },
   /**
+   * Snapshot first, then events. The stream ends without an error when the room closes, when the
+   * SFU shuts down, or when the subscriber falls more than 4096 events behind; reopen
+   * (AllocateRoom then Stats) and treat the new snapshot as the truth.
+   *
    * @generated from rpc sfu.v1.SfuService.Stats
    */
   stats: {

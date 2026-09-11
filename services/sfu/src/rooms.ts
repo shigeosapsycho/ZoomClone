@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { types as ms } from "mediasoup";
+import type { Logger } from "pino";
 import { MEDIA_CODECS } from "./codecs";
 import type { Env } from "./env";
 import { SfuError, guarded } from "./errors";
-import { EventQueue, type RoomEvent } from "./events";
+import { EventQueue, MAX_QUEUED_EVENTS, type RoomEvent } from "./events";
 import { pickWorker, type WorkerSlot } from "./workers";
 
 export type Direction = "send" | "recv";
@@ -82,19 +83,28 @@ export type RoomSnapshot = {
   }>;
 };
 
+/** A Stats subscription: the snapshot it starts from and the events that follow it. */
+export type StatsOpening = {
+  snapshot: RoomSnapshot;
+  events: AsyncGenerator<RoomEvent, void, undefined>;
+};
+
 export type RoomOptions = {
   sfuId: string;
   audioLevelIntervalMs: number;
   qosIntervalMs: number;
   initialAvailableOutgoingBitrate: number;
+  /** Room-level warnings (a Stats subscriber falling behind); silent when absent. */
+  log?: Logger;
 };
 
-export function roomOptionsFrom(env: Env): RoomOptions {
+export function roomOptionsFrom(env: Env, log?: Logger): RoomOptions {
   return {
     sfuId: env.SFU_ID,
     audioLevelIntervalMs: env.SFU_AUDIO_LEVEL_INTERVAL_MS,
     qosIntervalMs: env.SFU_QOS_INTERVAL_MS,
     initialAvailableOutgoingBitrate: env.SFU_INITIAL_OUTGOING_BITRATE,
+    log,
   };
 }
 
@@ -104,6 +114,7 @@ export class Room {
   readonly consumers = new Map<string, ConsumerEntry>();
   private readonly queues = new Set<EventQueue<RoomEvent>>();
   private readonly qosTimer: NodeJS.Timeout;
+  private readonly log: Logger | undefined;
   private closed = false;
 
   constructor(
@@ -113,6 +124,7 @@ export class Room {
     readonly audioLevelObserver: ms.AudioLevelObserver,
     readonly options: RoomOptions,
   ) {
+    this.log = options.log;
     audioLevelObserver.on("volumes", (volumes) => {
       this.emit({
         type: "dominant_speakers",
@@ -130,6 +142,11 @@ export class Room {
 
   get isClosed(): boolean {
     return this.closed;
+  }
+
+  /** Live Stats subscribers registered on this room. */
+  get subscriberCount(): number {
+    return this.queues.size;
   }
 
   // ---- transports ----
@@ -414,16 +431,46 @@ export class Room {
     };
   }
 
-  /** Live event stream for one subscriber; ends on room close or when the signal aborts. */
-  async *events(signal?: AbortSignal): AsyncGenerator<RoomEvent, void, undefined> {
-    const queue = new EventQueue<RoomEvent>();
-    this.queues.add(queue);
-    if (this.closed) queue.end();
-    try {
-      yield* queue.drain(signal);
-    } finally {
+  /**
+   * Registers the subscriber before taking the snapshot, so nothing emitted after the snapshot
+   * is lost: events land in the queue and drain after the snapshot has been sent. The generator
+   * body only runs on the first pull, so abort and overflow unregister the queue from here rather
+   * than from inside it: a subscriber that aborts before ever pulling still goes away.
+   */
+  openStats(signal?: AbortSignal): StatsOpening {
+    const queue: EventQueue<RoomEvent> = new EventQueue({
+      maxSize: MAX_QUEUED_EVENTS,
+      onOverflow: () => {
+        this.queues.delete(queue);
+        this.log?.warn(
+          { sessionId: this.sessionId, maxQueuedEvents: MAX_QUEUED_EVENTS },
+          "stats subscriber fell behind, ending its stream",
+        );
+      },
+    });
+    const unregister = () => {
       this.queues.delete(queue);
-    }
+      queue.end();
+    };
+    if (this.closed) queue.end();
+    else this.queues.add(queue);
+    const snapshot = this.snapshot();
+    if (signal?.aborted) unregister();
+    else signal?.addEventListener("abort", unregister, { once: true });
+    const events = (async function* () {
+      try {
+        yield* queue.drain(signal);
+      } finally {
+        signal?.removeEventListener("abort", unregister);
+        unregister();
+      }
+    })();
+    return { snapshot, events };
+  }
+
+  /** Live event stream for one subscriber; ends on room close, overflow, or abort. */
+  events(signal?: AbortSignal): AsyncGenerator<RoomEvent, void, undefined> {
+    return this.openStats(signal).events;
   }
 
   close(): void {

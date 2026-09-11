@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CLIENT_DTLS_PARAMETERS, createTestManager } from "../test/helpers";
+import { CLIENT_DTLS_PARAMETERS, createTestManager, waitFor } from "../test/helpers";
+import type { RoomEvent } from "./events";
 import type { RoomManager } from "./rooms";
 
 let ctx: Awaited<ReturnType<typeof createTestManager>>;
@@ -85,14 +86,14 @@ describe("Room transports", () => {
 
   it("closes transports and emits transport_closed, unknown ids are NOT_FOUND", async () => {
     const room = await manager.allocate("s6");
-    const events: unknown[] = [];
+    const events: RoomEvent[] = [];
     const controller = new AbortController();
     const reader = (async () => {
       for await (const e of room.events(controller.signal)) events.push(e);
     })();
     const { transportId } = await room.createTransport("p2", "send");
     await room.closeTransport(transportId);
-    await new Promise((r) => setTimeout(r, 20));
+    await waitFor(() => events.some((e) => e.type === "transport_closed"));
     expect(room.transports.has(transportId)).toBe(false);
     expect(events).toContainEqual({
       type: "transport_closed",

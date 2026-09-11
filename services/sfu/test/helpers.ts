@@ -139,6 +139,15 @@ export async function startTestSfu(overrides: Record<string, string> = {}): Prom
   };
 }
 
+/** Polls `predicate` every 10 ms until it is true; throws when `timeoutMs` elapse first. */
+export async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`waitFor: condition not met in ${timeoutMs} ms`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 /** Reads events from a server stream until `count` have arrived or `ms` elapse. */
 export async function take<T>(iter: AsyncIterable<T>, count: number, ms = 5000): Promise<T[]> {
   const out: T[] = [];

@@ -7,6 +7,7 @@ import {
   startTestSfu,
   take,
   videoSimulcastRtpParameters,
+  waitFor,
   type TestSfu,
 } from "../test/helpers";
 
@@ -296,21 +297,38 @@ describe("Sfu gRPC service", () => {
     })();
     await sfu.client.unpublish({ producerId: pub.producerId });
     await sfu.client.closeTransport({ transportId: recv.transportId });
-    await new Promise((r) => setTimeout(r, 600));
+    const expectedCases: Array<StatsEvent["event"]["case"]> = [
+      "producerClosed",
+      "consumerClosed",
+      "transportClosed",
+      "qos",
+    ];
+    const seen = () => rest.map((e) => e.event.case);
+    await waitFor(() => expectedCases.every((c) => seen().includes(c)), 5000);
     await sfu.client.closeRoom({ sessionId: "g5" });
     await reader;
 
-    const cases = rest.map((e) => e.event.case);
-    expect(cases).toContain("producerClosed");
-    expect(cases).toContain("consumerClosed");
-    expect(cases).toContain("transportClosed");
-    expect(cases).toContain("qos");
+    const cases = seen();
+    expect(cases).toEqual(expect.arrayContaining(expectedCases));
     const closed = rest.find((e) => e.event.case === "consumerClosed");
     expect(closed?.event.case === "consumerClosed" && closed.event.value.reason).toBe(
       "producerclose",
     );
     expect(sfu.manager.get("g5")).toBeUndefined();
     await sfu.client.closeRoom({ sessionId: "g5" });
+  });
+
+  it("aborting a stats stream unregisters its subscriber", async () => {
+    await sfu.client.allocateRoom({ sessionId: "g6" });
+    const room = sfu.manager.require("g6");
+    const controller = new AbortController();
+    const stream = sfu.client.stats({ sessionId: "g6" }, { signal: controller.signal });
+    const [first] = await take(stream, 1);
+    expect(first?.event.case).toBe("snapshot");
+    expect(room.subscriberCount).toBe(1);
+    controller.abort();
+    await waitFor(() => room.subscriberCount === 0);
+    await sfu.client.closeRoom({ sessionId: "g6" });
   });
 
   it("serves health and metrics over plain http2", async () => {
