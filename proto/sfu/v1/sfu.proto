@@ -4,7 +4,7 @@ package sfu.v1;
 
 // Room Controller <-> SFU contract (design doc "gRPC Sfu": spec 5.3 plus MVP additions).
 // mediasoup parameter blobs travel as JSON strings; ids, enums and flags are typed.
-service Sfu {
+service SfuService {
   rpc AllocateRoom(AllocateRoomRequest) returns (AllocateRoomResponse);
   rpc CloseRoom(CloseRoomRequest) returns (CloseRoomResponse);
   rpc CreateTransport(CreateTransportRequest) returns (CreateTransportResponse);

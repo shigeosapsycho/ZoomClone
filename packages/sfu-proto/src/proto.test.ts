@@ -4,14 +4,14 @@ import {
   MediaKind,
   MediaSource,
   PublishRequestSchema,
-  Sfu,
+  SfuService,
   StatsEventSchema,
   TransportDirection,
 } from "./index";
 
 describe("sfu proto", () => {
   it("exposes the fifteen RPCs of the contract", () => {
-    const names = Object.keys(Sfu.method).sort();
+    const names = Object.keys(SfuService.method).sort();
     expect(names).toEqual(
       [
         "allocateRoom",
@@ -31,7 +31,7 @@ describe("sfu proto", () => {
         "unsubscribe",
       ].sort(),
     );
-    expect(Sfu.method.stats.methodKind).toBe("server_streaming");
+    expect(SfuService.method.stats.methodKind).toBe("server_streaming");
   });
 
   it("round-trips a publish request and the stats oneof", () => {
