@@ -173,6 +173,8 @@ export class RoomRegistry {
     }
     if (command.cmd !== "end") return;
     const reason: EndReason = isEndReason(command.reason) ? command.reason : "api_end";
-    void controller.endRoom(reason);
+    void controller
+      .endRoom(reason)
+      .catch((error: unknown) => this.deps.log.error({ channel, error }, "ctl end failed"));
   }
 }
