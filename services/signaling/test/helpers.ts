@@ -13,7 +13,9 @@ import { loadEnv, type Env } from "../src/env";
 import type { ParticipantLink } from "../src/gateway/link";
 import { Checkpoint, OwnerLease } from "../src/room/checkpoint";
 import { RoomController, type ControllerTimings } from "../src/room/controller";
-import { Room } from "../src/room/room";
+import { RoomRegistry, type RegistryTimings } from "../src/room/registry";
+import { DEFAULT_ROOM_OPTIONS, Room } from "../src/room/room";
+import { SfuDirectory } from "../src/sfu/directory";
 import type { FakeSfu } from "./fake-sfu";
 
 export function testRedisUrl(): string {
@@ -221,4 +223,31 @@ export async function createTestController(opts: {
   });
   await controller.start();
   return { controller, room, lease, gone };
+}
+
+export function createTestRegistry(
+  infra: TestInfra,
+  sfuBaseUrl: string,
+  overrides: Partial<RegistryTimings> = {},
+): RoomRegistry {
+  const { env } = infra;
+  return new RoomRegistry({
+    redis: infra.redis,
+    subscriber: infra.subscriber,
+    sfus: new SfuDirectory({ "fake-sfu": sfuBaseUrl }),
+    db: infra.db,
+    bus: infra.bus,
+    log: silentLog,
+    timings: {
+      graceMs: env.DISCONNECT_GRACE_MS,
+      idleMs: env.ROOM_IDLE_TIMEOUT_MS,
+      heartbeatMs: env.HEARTBEAT_MS,
+      speakerTickMs: 50,
+      statsRetryMs: 50,
+      checkpointWindowMs: env.CHECKPOINT_WINDOW_MS,
+      leaseMs: env.OWNER_LEASE_MS,
+      ...overrides,
+    },
+    roomOptions: DEFAULT_ROOM_OPTIONS,
+  });
 }
