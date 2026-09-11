@@ -16,7 +16,11 @@ J observability/K8s). Decisions taken with the user in this session:
 - Scope for this pass: **MVP vertical slice A + B + C**. Real multi-party WebRTC call end to end,
   single region, single SFU, local infra. Later slices stack on top without rewrites.
 - Stack: **TypeScript (Node 24) + mediasoup** SFU behind the spec's gRPC contract.
-- Verification: **minimal harness page served at `/dev/` + Playwright** with fake camera/mic.
+- Verification: **client page served at `/dev/` + Playwright** with fake camera/mic. Per the user
+  (mid-session): the client UI must be distinctive, not the generic AI-generated look; visual
+  direction chosen with the `frontend-design` skill when that phase starts. Vanilla TS + CSS,
+  no framework, so the esbuild bundle stays simple.
+- After the MVP works end to end: push the repo to GitHub (remote to be confirmed with the user).
 - Signaling Gateway and Room Controller: **one process, explicit module boundary**. Process
   restart still exercises the Redis rehydrate path (the hard failover case).
 
@@ -330,7 +334,8 @@ connected or wrong direction `FAILED_PRECONDITION`; mediasoup errors `INTERNAL` 
 - `writer/PostgresWriter.ts`: bus consumer. `participant.joined` -> upsert `participants` by id;
   `participant.left` -> `left_at`, `leave_reason` (upsert); `session.ended` -> `endSession`
   (idempotent backup). Batched, retried, never awaited on the message path.
-- `dev/`: harness page (vanilla TS + mediasoup-client, esbuild bundle) served at `/dev/` when
+- `dev/`: client page (vanilla TS + CSS + mediasoup-client, esbuild bundle, distinctive visual
+  design, see Context) served at `/dev/` when
   `DEV_HARNESS=true`. Flow: code + name (+ optional bearer) -> `/join` -> hello -> Device.load ->
   transports -> getUserMedia -> produce (video simulcast 180p/150k, 360p/500k, 720p/1.5M; join
   muted honoured via `paused`) -> declarative subscribe to every track in the roster -> tiles,
