@@ -35,16 +35,17 @@ export async function endSession(
           peak_participants = COALESCE(${input.peakParticipants ?? null}::int, peak_participants)
       WHERE id = ${session.id}`;
 
-    const meetingStatus = input.reason === "idle" ? "scheduled" : "ended";
-    if (meetingStatus === "ended") {
-      await tx`
-        UPDATE meetings SET status = 'ended', ended_at = now()
-        WHERE id = ${session.meetingId} AND status = 'live'`;
-    } else {
-      await tx`
-        UPDATE meetings SET status = 'scheduled'
-        WHERE id = ${session.meetingId} AND status = 'live'`;
-    }
-    return { ended: true, meetingId: session.meetingId, meetingStatus };
+    const targetStatus = input.reason === "idle" ? "scheduled" : "ended";
+    const [updated] =
+      targetStatus === "ended"
+        ? await tx<{ status: "ended" | "scheduled" }[]>`
+            UPDATE meetings SET status = 'ended', ended_at = now()
+            WHERE id = ${session.meetingId} AND status = 'live'
+            RETURNING status`
+        : await tx<{ status: "ended" | "scheduled" }[]>`
+            UPDATE meetings SET status = 'scheduled'
+            WHERE id = ${session.meetingId} AND status = 'live'
+            RETURNING status`;
+    return { ended: true, meetingId: session.meetingId, meetingStatus: updated?.status ?? null };
   });
 }

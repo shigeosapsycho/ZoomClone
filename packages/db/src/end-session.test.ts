@@ -18,13 +18,13 @@ beforeEach(async () => {
   await truncateAll(db);
 });
 
-async function liveMeeting(peak: number | null = null) {
+async function liveMeeting(peak: number | null = null, status = "live") {
   const meetingId = randomUUID();
   const sessionId = randomUUID();
   await db`
     INSERT INTO meetings (id, code, org_id, organizer_id, region, settings, status)
     VALUES (${meetingId}, ${meetingId.slice(0, 3) + "-" + meetingId.slice(4, 8) + "-" + meetingId.slice(9, 12)},
-            ${randomUUID()}, ${randomUUID()}, 'local', ${db.json({ lobby: true, max_participants: 500 })}, 'live')`;
+            ${randomUUID()}, ${randomUUID()}, 'local', ${db.json({ lobby: true, max_participants: 500 })}, ${status})`;
   await db`
     INSERT INTO meeting_sessions (id, meeting_id, started_at, peak_participants)
     VALUES (${sessionId}, ${meetingId}, now(), ${peak})`;
@@ -90,5 +90,15 @@ describe("endSession", () => {
       meetingId: null,
       meetingStatus: null,
     });
+  });
+
+  it("reports meetingStatus:null when the meeting was not live", async () => {
+    const { meetingId, sessionId } = await liveMeeting(null, "scheduled");
+    const result = await endSession(db, { sessionId, reason: "host_end" });
+    expect(result).toEqual({ ended: true, meetingId, meetingStatus: null });
+    expect((await session(sessionId)).endedAt).toBeInstanceOf(Date);
+    const m = await meeting(meetingId);
+    expect(m.status).toBe("scheduled");
+    expect(m.endedAt).toBeNull();
   });
 });
