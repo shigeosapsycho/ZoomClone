@@ -15,6 +15,8 @@ export const DEFAULT_MEETING_SETTINGS: MeetingSettings = MeetingSettingsSchema.p
 
 const title = z.string().trim().min(1).max(200);
 
+// zod 4's `.partial()` keeps `.default()` values, so a PATCH with `{ lobby: false }` would
+// silently reset `max_participants`; this schema has no defaults.
 const MeetingSettingsPartial = z.object({
   lobby: z.boolean().optional(),
   max_participants: z.number().int().min(2).max(500).optional(),
