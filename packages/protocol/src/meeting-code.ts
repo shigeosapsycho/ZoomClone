@@ -1,5 +1,3 @@
-import { randomInt } from "node:crypto";
-
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 
 /** Spec 8: 10 alphanumeric chars (about 51.7 bits), displayed as xxx-xxxx-xxx. */
@@ -8,7 +6,19 @@ export const MEETING_CODE_RE = /^[a-z0-9]{3}-[a-z0-9]{4}-[a-z0-9]{3}$/;
 /** Returns an index into the 36-char alphabet. Injectable for deterministic tests. */
 export type CodeRng = () => number;
 
-const defaultRng: CodeRng = () => randomInt(0, ALPHABET.length);
+/**
+ * Web Crypto (Node 24 and browsers alike, so the browser client can bundle this package).
+ * Rejection sampling keeps the 36-way choice uniform across the byte range.
+ */
+const defaultRng: CodeRng = () => {
+  const bytes = new Uint8Array(1);
+  const limit = 256 - (256 % ALPHABET.length);
+  for (;;) {
+    crypto.getRandomValues(bytes);
+    const value = bytes[0]!;
+    if (value < limit) return value % ALPHABET.length;
+  }
+};
 
 export function generateMeetingCode(rng: CodeRng = defaultRng): string {
   let raw = "";
