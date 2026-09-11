@@ -76,8 +76,9 @@ bad JSON `INVALID_ARGUMENT`, `Cascade` `UNIMPLEMENTED`.
 
 The signaling gateway and room controller run in one process (`services/signaling`). Clients
 connect to `ws://localhost:8081/rooms/{session_id}` with the token from `POST /v1/join` and
-speak the protocol in `packages/protocol/src/ws` (every request is answered by `ack` or `error`;
-`hello` is answered by `ack {mode}` followed by `welcome`, `resync` or replayed events).
+speak the protocol in `packages/protocol/src/ws` (every request is answered by `ack` or `error`,
+except `ping`, which gets `pong`; `hello` is answered by `ack {mode}` followed by `welcome`,
+`resync` or replayed events).
 
 ```sh
 pnpm --filter @zoomclone/signaling start   # or: pnpm dev (all services)

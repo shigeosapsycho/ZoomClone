@@ -12,6 +12,7 @@ import {
   mintToken,
   seedSession,
   startTestSignaling,
+  waitFor,
   type TestInfra,
   type TestSignaling,
 } from "../test/helpers";
@@ -101,7 +102,8 @@ describe("signaling against the real SFU", () => {
     await host.request("host.end", {});
     expect((await ann.waitForClose()).code).toBe(4004);
     expect((await host.waitForClose()).code).toBe(4004);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // CloseRoom runs after the sockets close; poll instead of guessing the gap.
+    await waitFor(() => sfu.manager.size === 0);
     expect(sfu.manager.size).toBe(0);
   });
 });
