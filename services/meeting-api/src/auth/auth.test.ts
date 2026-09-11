@@ -1,5 +1,5 @@
-import { SignJWT, generateKeyPair } from "jose";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { SignJWT, createRemoteJWKSet, generateKeyPair } from "jose";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { bearer, createTestContext, mintUser, type TestContext } from "../../test/helpers";
 import { orgIdFromClaim } from "./user-id";
 import { OidcUserVerifier } from "./user-verifier";
@@ -124,6 +124,31 @@ describe("auth", () => {
     const orgId = "22222222-2222-4222-8222-222222222222";
     const withOrg = await sign({ org_id: orgId });
     await expect(verifier.verify(withOrg)).resolves.toMatchObject({ orgId });
+  });
+
+  it("reports an unreachable identity provider as UNAVAILABLE, not UNAUTHORIZED", async () => {
+    const onError = vi.fn();
+    const verifier = new OidcUserVerifier({
+      key: createRemoteJWKSet(new URL("http://127.0.0.1:1/jwks.json")),
+      issuer: "https://idp.example.com",
+      audience: "zoomclone",
+      algorithms: ["ES256"],
+      defaultOrgId: ctx.env.DEFAULT_ORG_ID,
+      requireOrg: false,
+      onError,
+    });
+    const { privateKey } = await generateKeyPair("ES256");
+    const token = await new SignJWT({})
+      .setProtectedHeader({ alg: "ES256" })
+      .setIssuer("https://idp.example.com")
+      .setAudience("zoomclone")
+      .setSubject("2f6a2b6e-6f0b-4c1e-9a52-0c5d3f1a9b12")
+      .setIssuedAt()
+      .setExpirationTime("1h")
+      .sign(privateKey);
+
+    await expect(verifier.verify(token)).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    expect(onError).toHaveBeenCalledTimes(1);
   });
 
   it("does not serve the dev issuer when it is disabled", async () => {
