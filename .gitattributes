@@ -1,0 +1,9 @@
+# Every checkout gets LF regardless of core.autocrlf; prettier and .editorconfig expect it.
+* text=auto eol=lf
+
+*.pdf binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
