@@ -35,12 +35,21 @@ async function createMeeting(settings: Record<string, unknown> = {}): Promise<Me
 
 function join(
   code: string,
-  opts: { token?: string; name?: string; remoteAddress?: string; app?: TestContext["app"] } = {},
+  opts: {
+    token?: string;
+    name?: string;
+    remoteAddress?: string;
+    forwardedFor?: string;
+    app?: TestContext["app"];
+  } = {},
 ) {
   return (opts.app ?? ctx.app).inject({
     method: "POST",
     url: "/v1/join",
-    headers: opts.token ? bearer(opts.token) : {},
+    headers: {
+      ...(opts.token ? bearer(opts.token) : {}),
+      ...(opts.forwardedFor ? { "x-forwarded-for": opts.forwardedFor } : {}),
+    },
     remoteAddress: opts.remoteAddress,
     payload: { code, display_name: opts.name ?? "Guest" },
   });
@@ -238,6 +247,31 @@ describe("POST /v1/join", () => {
       expect(metrics.body).toMatch(/join_errors_total\{code="MEETING_NOT_FOUND"\} 6/);
     } finally {
       await limited.close();
+    }
+  });
+
+  it("keys the per-IP limit on X-Forwarded-For only when TRUST_PROXY is on", async () => {
+    // Behind a proxy every client arrives from one socket address; without the knob the per-IP
+    // budget is shared by all of them.
+    const direct = await createTestContext({ JOIN_RATE_LIMIT: "2" });
+    const proxied = await createTestContext({ JOIN_RATE_LIMIT: "2", TRUST_PROXY: "true" });
+    try {
+      for (let i = 0; i < 2; i++) {
+        await join("zzz-zzzz-zzz", { app: direct.app, forwardedFor: `203.0.113.${i}` });
+      }
+      const shared = await join("zzz-zzzz-zzz", { app: direct.app, forwardedFor: "203.0.113.9" });
+      expect(shared.statusCode).toBe(429);
+
+      for (let i = 0; i < 3; i++) {
+        const own = await join("zzz-zzzz-zzz", {
+          app: proxied.app,
+          forwardedFor: `203.0.113.${i}`,
+        });
+        expect(own.statusCode).toBe(404);
+      }
+    } finally {
+      await direct.close();
+      await proxied.close();
     }
   });
 });

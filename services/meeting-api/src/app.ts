@@ -23,6 +23,7 @@ export type App = FastifyInstance;
 
 export async function buildApp(deps: AppDeps): Promise<App> {
   const app = Fastify({
+    trustProxy: deps.env.TRUST_PROXY,
     logger:
       deps.env.NODE_ENV === "test"
         ? false

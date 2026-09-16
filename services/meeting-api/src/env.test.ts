@@ -16,6 +16,8 @@ describe("loadEnv", () => {
     expect(env.JOIN_RATE_LIMIT_PER_CODE).toBe(120);
     expect(env.JOIN_RATE_WINDOW_MS).toBe(60_000);
     expect(env.OIDC_ALGORITHMS).toEqual(["RS256", "ES256"]);
+    expect(env.TRUST_PROXY).toBe(false);
+    expect(loadEnv({ ...base, TRUST_PROXY: "true" }).TRUST_PROXY).toBe(true);
 
     const singleAlgorithm = loadEnv({ ...base, OIDC_ALGORITHMS: "RS256" });
     expect(singleAlgorithm.OIDC_ALGORITHMS).toEqual(["RS256"]);

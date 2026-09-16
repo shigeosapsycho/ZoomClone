@@ -42,6 +42,10 @@ Design: `docs/superpowers/specs/2026-09-10-video-meeting-mvp-design.md`.
 Errors: `{ "error": { "code": "...", "message": "..." } }` with spec 5.1 codes
 (`MEETING_NOT_FOUND`, `LOCKED`, `ENDED`, `CAPACITY`, `NO_CAPACITY`, `RATE_LIMITED`, ...).
 
+`/v1/join` is rate limited per client IP (`JOIN_RATE_LIMIT`) and per meeting code
+(`JOIN_RATE_LIMIT_PER_CODE`). Behind a reverse proxy set `TRUST_PROXY=true` so the IP comes from
+`X-Forwarded-For`; otherwise every client shares the proxy's budget.
+
 Smoke test with the dev issuer:
 
 ```sh
@@ -125,5 +129,8 @@ pnpm infra:up
 pnpm e2e:install            # once: downloads Chromium
 pnpm test:e2e
 ```
+
+On Linux the downloaded Chromium also needs the system libraries (`libnspr4`, `libnss3`, `libasound2`),
+which `pnpm --filter @zoomclone/e2e exec playwright install-deps chromium` installs with root.
 
 `pnpm check` never runs the browser suite.

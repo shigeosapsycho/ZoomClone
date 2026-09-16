@@ -28,6 +28,9 @@ export const EnvSchema = z
     OIDC_JWKS_URL: z.string().optional(),
     // When true, bearer tokens without an org_id claim are rejected in remote OIDC mode.
     OIDC_REQUIRE_ORG: bool,
+    // Behind a reverse proxy req.ip is the proxy's address, so the per-IP join limit would
+    // throttle every client together; true makes Fastify read X-Forwarded-For instead.
+    TRUST_PROXY: bool,
     OIDC_ALGORITHMS: z
       .string()
       .default("RS256,ES256")
