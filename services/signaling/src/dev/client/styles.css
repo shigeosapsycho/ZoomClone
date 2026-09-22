@@ -389,16 +389,22 @@ textarea {
   gap: 6px;
 }
 
+/* Sized by what was said: no well of dead space under two lines, a scroll once it grows. */
 .talk .lines {
   background: var(--well);
   border-radius: 3px;
   padding: 8px 10px;
-  height: 180px;
+  max-height: min(40vh, 320px);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 4px;
   overflow-wrap: anywhere;
+}
+
+.talk .lines:empty::before {
+  content: "nothing said yet";
+  color: var(--ink-dim);
 }
 
 .talk .lines .who {
