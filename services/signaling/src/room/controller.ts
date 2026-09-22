@@ -1278,6 +1278,8 @@ export class RoomController {
     });
     await this.deps.lease.release().catch((e: unknown) => this.warn("lease release failed", e));
     this.deps.onGone(sessionId);
+    // The registry logs "room created"; this is its counterpart for an operator tailing the log.
+    this.deps.log.info({ sessionId, reason, peak: this.room.peak }, "room ended");
   }
 
   /**
