@@ -6,6 +6,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json && tsc -p src/dev/client/tsconfig.json",
     "test": "vitest run --passWithNoTests",
+    "smoke": "node --import tsx scripts/smoke-client.ts",
     "dev": "node --env-file-if-exists=../../.env --import tsx --watch src/main.ts",
     "start": "node --env-file-if-exists=../../.env --import tsx src/main.ts"
   },

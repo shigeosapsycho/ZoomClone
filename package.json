@@ -12,6 +12,7 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r --workspace-concurrency=1 test",
     "test:e2e": "pnpm --filter @zoomclone/e2e test:e2e",
+    "smoke": "pnpm --filter @zoomclone/signaling smoke",
     "e2e:install": "pnpm --filter @zoomclone/e2e install-browsers",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

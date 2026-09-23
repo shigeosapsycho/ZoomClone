@@ -25,6 +25,19 @@ pnpm check                 # typecheck + prettier + unit/integration tests (need
 
 Design: `docs/superpowers/specs/2026-09-10-video-meeting-mvp-design.md`.
 
+System report (purpose, components, system model, architecture, first communication flow):
+`docs/system-report.md`.
+
+## Watch the services talk
+
+```sh
+LOG_LEVEL=debug pnpm dev      # logs every HTTP request, WebSocket frame and gRPC call, both ends
+pnpm smoke                    # second terminal: token, create, join, hello, chat, end
+```
+
+The debug lines carry types, ids, sequence numbers and outcomes, never payloads: tokens, chat
+text and media parameters stay out of the log.
+
 ## Meeting API (port 8080)
 
 | Method | Path                     | Auth                                   |
