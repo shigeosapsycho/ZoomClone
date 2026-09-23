@@ -1,6 +1,8 @@
 import { createClient, type Client } from "@connectrpc/connect";
 import { createGrpcTransport } from "@connectrpc/connect-node";
 import { SfuService } from "@zoomclone/sfu-proto";
+import type { Logger } from "pino";
+import { rpcClientLog } from "./rpc-log";
 
 export class UnknownSfuError extends Error {
   constructor(sfuId: string) {
@@ -13,7 +15,10 @@ export class UnknownSfuError extends Error {
 export class SfuDirectory {
   private readonly clients = new Map<string, Client<typeof SfuService>>();
 
-  constructor(private readonly endpoints: Record<string, string>) {}
+  constructor(
+    private readonly endpoints: Record<string, string>,
+    private readonly log?: Logger,
+  ) {}
 
   has(sfuId: string): boolean {
     return sfuId in this.endpoints;
@@ -32,7 +37,11 @@ export class SfuDirectory {
     // proxy could drop the h2 connection unnoticed.
     const client = createClient(
       SfuService,
-      createGrpcTransport({ baseUrl, pingIntervalMs: 10_000 }),
+      createGrpcTransport({
+        baseUrl,
+        pingIntervalMs: 10_000,
+        interceptors: this.log ? [rpcClientLog(this.log, sfuId)] : [],
+      }),
     );
     this.clients.set(sfuId, client);
     return client;

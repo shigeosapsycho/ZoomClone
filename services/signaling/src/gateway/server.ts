@@ -54,6 +54,30 @@ function refuseUpgrade(socket: Duplex, status: string): void {
  * A peer that stopped reading never answers the close frame; ws would hold the socket, its
  * buffer and the connection gauge slot for its 30 s close timeout. Drop it after a second.
  */
+/**
+ * Debug-level trace of every frame through the gateway: direction, type, request id, seq. No
+ * payloads (hello carries the signaling token, chat carries what people typed). Pings and pongs
+ * go to trace so a debug log is not one line every ten seconds per socket.
+ */
+function logFrame(
+  log: Logger,
+  link: string,
+  msg: "ws recv" | "ws send",
+  frame: { type: string; id?: string | undefined; seq?: number | undefined },
+): void {
+  const level = frame.type === "ping" || frame.type === "pong" ? "trace" : "debug";
+  if (!log.isLevelEnabled(level)) return;
+  log[level](
+    {
+      link,
+      type: frame.type,
+      ...(frame.id === undefined ? {} : { id: frame.id }),
+      ...(frame.seq === undefined ? {} : { seq: frame.seq }),
+    },
+    msg,
+  );
+}
+
 function terminateUnlessClosed(socket: WebSocket): void {
   setTimeout(() => {
     if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
@@ -82,6 +106,7 @@ export class WsLink implements ParticipantLink {
       return;
     }
     this.socket.send(JSON.stringify(message));
+    logFrame(this.log, this.id, "ws send", message);
   }
 
   close(code: number, reason?: string): void {
@@ -203,6 +228,7 @@ class Connection {
       return;
     }
     const message = parsed.data;
+    logFrame(this.deps.log, this.link.id, "ws recv", message);
     try {
       if (message.type === "ping") {
         this.lastPingAt = Date.now();

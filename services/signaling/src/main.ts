@@ -24,7 +24,7 @@ const metrics = createMetrics(() => registry.size);
 const registry = new RoomRegistry({
   redis,
   subscriber,
-  sfus: new SfuDirectory(env.SFU_ENDPOINTS),
+  sfus: new SfuDirectory(env.SFU_ENDPOINTS, log),
   db,
   bus,
   log,

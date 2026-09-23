@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { createClient } from "@connectrpc/connect";
 import { createGrpcTransport } from "@connectrpc/connect-node";
 import Redis from "ioredis";
-import pino from "pino";
+import pino, { type Logger } from "pino";
 import { WebSocket } from "ws";
 import { createDb, type Db } from "@zoomclone/db";
 import { ensureTestDatabase, testDatabaseUrl, truncateAll } from "@zoomclone/db/testing";
@@ -248,12 +248,13 @@ export function createTestRegistry(
   infra: TestInfra,
   sfuBaseUrl: string,
   overrides: Partial<RegistryTimings> = {},
+  log: Logger = silentLog,
 ): RoomRegistry {
   const { env } = infra;
   return new RoomRegistry({
     redis: infra.redis,
     subscriber: infra.subscriber,
-    sfus: new SfuDirectory({ "fake-sfu": sfuBaseUrl }),
+    sfus: new SfuDirectory({ "fake-sfu": sfuBaseUrl }, log),
     db: infra.db,
     bus: infra.bus,
     log: silentLog,
@@ -387,15 +388,18 @@ export async function startTestSignaling(
     timings?: Partial<RegistryTimings>;
     env?: Partial<Env>;
     harness?: HarnessBundle;
+    /** Defaults to silent; pass a capturing logger to assert on what the gateway logs. */
+    log?: Logger;
   } = {},
 ): Promise<TestSignaling> {
-  const registry = createTestRegistry(infra, sfuBaseUrl, opts.timings ?? {});
+  const log = opts.log ?? silentLog;
+  const registry = createTestRegistry(infra, sfuBaseUrl, opts.timings ?? {}, log);
   const metrics = createMetrics(() => registry.size);
   const { server, wss } = createApp({
     registry,
     verifier: localTokenVerifier(infra.keys, TEST_ISSUER),
     env: { ...infra.env, ...opts.env },
-    log: silentLog,
+    log,
     metrics,
     harness: opts.harness,
   });

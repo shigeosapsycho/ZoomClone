@@ -1,5 +1,6 @@
 import { Code, ConnectError } from "@connectrpc/connect";
 import { MediaKind, MediaSource, TransportDirection, type StatsEvent } from "@zoomclone/sfu-proto";
+import pino from "pino";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   CLIENT_DTLS_PARAMETERS,
@@ -393,6 +394,51 @@ describe("Sfu gRPC service", () => {
       expect(metrics.body).toContain("sfu_rooms");
     } finally {
       client.close();
+    }
+  });
+});
+
+describe("Sfu gRPC message log", () => {
+  it("logs each handled call with method, ids and outcome at debug, and no payload blobs", async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const log = pino(
+      { level: "debug" },
+      { write: (line: string) => void lines.push(JSON.parse(line) as Record<string, unknown>) },
+    );
+    const logged = await startTestSfu({}, log);
+    try {
+      await logged.client.allocateRoom({ sessionId: "log-s1" });
+      await codeOf(logged.client.closeTransport({ transportId: "missing" }));
+      const created = await logged.client.createTransport({
+        sessionId: "log-s1",
+        participantId: "p1",
+        direction: TransportDirection.SEND,
+      });
+      expect(lines).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            msg: "grpc handled",
+            method: "AllocateRoom",
+            sessionId: "log-s1",
+            code: "OK",
+          }),
+          expect.objectContaining({
+            msg: "grpc handled",
+            method: "CloseTransport",
+            code: "NotFound",
+          }),
+          expect.objectContaining({
+            msg: "grpc handled",
+            method: "CreateTransport",
+            sessionId: "log-s1",
+            participantId: "p1",
+            code: "OK",
+          }),
+        ]),
+      );
+      expect(JSON.stringify(lines)).not.toContain(created.dtlsParametersJson.slice(0, 40));
+    } finally {
+      await logged.stop();
     }
   });
 });

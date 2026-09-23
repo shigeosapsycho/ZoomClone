@@ -1,4 +1,5 @@
 import { createConnection } from "node:net";
+import pino from "pino";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { CloseCode, type SignalingClaims } from "@zoomclone/protocol";
@@ -310,5 +311,47 @@ describe("gateway: sessions", () => {
     expect(host.ofType("room.ended")[0]?.payload).toEqual({ reason: "api_end" });
     await waitFor(() => signaling.registry.size === 0);
     await sleep(20);
+  });
+});
+
+describe("gateway: message log", () => {
+  it("logs every frame and SFU call at debug with ids and types but no token or chat text", async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const log = pino(
+      { level: "debug" },
+      { write: (line: string) => void lines.push(JSON.parse(line) as Record<string, unknown>) },
+    );
+    await signaling.close();
+    signaling = await startTestSignaling(infra, sfu.baseUrl, { log });
+
+    const client = await connect();
+    const token = await mintToken(
+      infra,
+      mintClaims({ session_id: sessionId, participant_id: HOST }),
+    );
+    expect(await client.request("hello", { token })).toMatchObject({ type: "ack" });
+    await client.waitFor("welcome");
+    expect(await client.request("chat", { body: "a secret sentence" })).toMatchObject({
+      type: "ack",
+    });
+
+    const recv = lines.filter((l) => l["msg"] === "ws recv").map((l) => l["type"]);
+    const sent = lines.filter((l) => l["msg"] === "ws send").map((l) => l["type"]);
+    expect(recv).toEqual(expect.arrayContaining(["hello", "chat"]));
+    expect(sent).toEqual(expect.arrayContaining(["ack", "welcome", "chat"]));
+    const chatAck = lines.find((l) => l["msg"] === "ws send" && l["type"] === "ack" && l["id"]);
+    expect(chatAck).toMatchObject({ link: expect.any(String) });
+    const pushed = lines.find((l) => l["msg"] === "ws send" && l["type"] === "chat");
+    expect(pushed).toMatchObject({ seq: expect.any(Number) });
+
+    const grpc = lines.filter((l) => l["msg"] === "grpc call").map((l) => l["method"]);
+    expect(grpc).toEqual(expect.arrayContaining(["AllocateRoom", "CreateTransport"]));
+    expect(lines.some((l) => l["msg"] === "grpc stream opened" && l["method"] === "Stats")).toBe(
+      true,
+    );
+
+    const all = JSON.stringify(lines);
+    expect(all).not.toContain(token);
+    expect(all).not.toContain("a secret sentence");
   });
 });

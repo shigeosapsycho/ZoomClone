@@ -58,7 +58,7 @@ process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 const slots = await createWorkers(env, log, (worker) => workersSoFar.push(worker));
 const manager = new RoomManager(slots, roomOptionsFrom(env, log));
-const server = createSfuServer(manager, createMetrics(manager));
+const server = createSfuServer(manager, createMetrics(manager), log);
 app = { slots, manager, server };
 
 server.listen(env.SFU_GRPC_PORT, "0.0.0.0", () => {

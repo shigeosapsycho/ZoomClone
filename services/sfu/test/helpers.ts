@@ -1,3 +1,4 @@
+import type { Logger } from "pino";
 import type { AddressInfo } from "node:net";
 import { createClient, type Client } from "@connectrpc/connect";
 import { createGrpcTransport } from "@connectrpc/connect-node";
@@ -122,9 +123,12 @@ export type TestSfu = {
   stop: () => Promise<void>;
 };
 
-export async function startTestSfu(overrides: Record<string, string> = {}): Promise<TestSfu> {
+export async function startTestSfu(
+  overrides: Record<string, string> = {},
+  log?: Logger,
+): Promise<TestSfu> {
   const base = await createTestManager(overrides);
-  const server = createSfuServer(base.manager, createMetrics(base.manager));
+  const server = createSfuServer(base.manager, createMetrics(base.manager), log);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   const baseUrl = `http://127.0.0.1:${port}`;
