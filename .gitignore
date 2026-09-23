@@ -8,6 +8,9 @@ coverage/
 !.env.example
 .DS_Store
 Thumbs.db
+e2e/.cache/
 e2e/test-results/
 e2e/playwright-report/
 services/signaling/public/dev/*.js
+.superpowers/
+.impeccable/

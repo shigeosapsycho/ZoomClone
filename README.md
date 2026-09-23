@@ -1,0 +1,149 @@
+# ZoomClone backend
+
+Backend for a multi-party video meeting system (see `video-meeting-backend-spec.pdf`). MVP slice:
+Meeting API (control plane), signaling + room controller, mediasoup SFU.
+
+## Run locally
+
+```sh
+corepack enable            # provides pnpm 9.15.9
+pnpm install
+pnpm infra:up              # Postgres on :55432, Redis on :56379 (docker compose)
+cp .env.example .env
+pnpm db:migrate
+pnpm dev                   # every service, watch mode
+```
+
+To keep a stable signing key across restarts, run `pnpm --filter @zoomclone/tokens gen-key` and put
+the PEM in `SIGNING_KEY_PEM` (multi-line values need quoting in `.env`).
+
+## Test
+
+```sh
+pnpm check                 # typecheck + prettier + unit/integration tests (needs pnpm infra:up)
+```
+
+Design: `docs/superpowers/specs/2026-09-10-video-meeting-mvp-design.md`.
+
+System report (purpose, components, system model, architecture, first communication flow):
+`docs/system-report.md`.
+
+## Watch the services talk
+
+```sh
+LOG_LEVEL=debug pnpm dev      # logs every HTTP request, WebSocket frame and gRPC call, both ends
+pnpm smoke                    # second terminal: token, create, join, hello, chat, end
+```
+
+The debug lines carry types, ids, sequence numbers and outcomes, never payloads: tokens, chat
+text and media parameters stay out of the log.
+
+## Meeting API (port 8080)
+
+| Method | Path                     | Auth                                   |
+| ------ | ------------------------ | -------------------------------------- |
+| POST   | `/v1/meetings`           | bearer                                 |
+| GET    | `/v1/meetings/{id}`      | bearer (same org)                      |
+| PATCH  | `/v1/meetings/{id}`      | organizer                              |
+| DELETE | `/v1/meetings/{id}`      | organizer                              |
+| POST   | `/v1/meetings/{id}:end`  | organizer                              |
+| POST   | `/v1/join`               | optional bearer (guests allowed)       |
+| GET    | `/v1/me`                 | bearer                                 |
+| GET    | `/.well-known/jwks.json` | none                                   |
+| POST   | `/dev/oidc/token`        | none, only with `AUTH_DEV_ISSUER=true` |
+
+Errors: `{ "error": { "code": "...", "message": "..." } }` with spec 5.1 codes
+(`MEETING_NOT_FOUND`, `LOCKED`, `ENDED`, `CAPACITY`, `NO_CAPACITY`, `RATE_LIMITED`, ...).
+
+`/v1/join` is rate limited per client IP (`JOIN_RATE_LIMIT`) and per meeting code
+(`JOIN_RATE_LIMIT_PER_CODE`). Behind a reverse proxy set `TRUST_PROXY=true` so the IP comes from
+`X-Forwarded-For`; otherwise every client shares the proxy's budget.
+
+Smoke test with the dev issuer:
+
+```sh
+TOKEN=$(curl -s -X POST localhost:8080/dev/oidc/token -H 'content-type: application/json' -d '{"name":"Host"}' \
+  | node -e 'process.stdin.on("data",d=>console.log(JSON.parse(d).access_token))')
+CODE=$(curl -s -X POST localhost:8080/v1/meetings -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"title":"Smoke"}' \
+  | node -e 'process.stdin.on("data",d=>console.log(JSON.parse(d).code))')
+curl -s -X POST localhost:8080/v1/join -H 'content-type: application/json' \
+  -d "{\"code\":\"$CODE\",\"display_name\":\"Guest\"}"
+```
+
+## SFU (gRPC :9090, media UDP/TCP :40000+)
+
+mediasoup workers behind the `sfu.v1.SfuService` contract (`proto/sfu/v1/sfu.proto`). One
+`WebRtcServer` per worker, so each worker uses exactly one UDP and one TCP port:
+`SFU_MEDIA_PORT_BASE + index`. Set `SFU_ANNOUNCED_IP` to the address browsers can reach (the host's
+LAN IP when testing from another device; `127.0.0.1` for a single machine). The gRPC port is
+unauthenticated; keep it on a private network (the signaling service is its only client).
+
+```sh
+pnpm proto:gen                       # regenerate packages/sfu-proto after editing the proto
+pnpm --filter @zoomclone/sfu start   # or: pnpm dev (all services)
+curl -s --http2-prior-knowledge localhost:9090/healthz
+```
+
+Errors map to gRPC codes: unknown ids `NOT_FOUND`, another room's or participant's entity
+`PERMISSION_DENIED`, wrong transport direction or incompatible capabilities `FAILED_PRECONDITION`,
+bad JSON `INVALID_ARGUMENT`, `Cascade` `UNIMPLEMENTED`.
+
+## Signaling (ws :8081)
+
+The signaling gateway and room controller run in one process (`services/signaling`). Clients
+connect to `ws://localhost:8081/rooms/{session_id}` with the token from `POST /v1/join` and
+speak the protocol in `packages/protocol/src/ws` (every request is answered by `ack` or `error`,
+except `ping`, which gets `pong`; `hello` is answered by `ack {mode}` followed by `welcome`,
+`resync` or replayed events).
+
+```sh
+pnpm --filter @zoomclone/signaling start   # or: pnpm dev (all services)
+curl -s localhost:8081/healthz              # {"ok":true,"rooms":0}
+```
+
+`/metrics` (Prometheus) is served unauthenticated on the same public port as the WebSocket
+endpoint; keep it behind the ingress (or scrape it over the private network only).
+
+Room state is checkpointed to Redis (`{room:<session_id>}:*`) within 50 ms of every change and an
+owner lease keeps one controller per room. Kill and restart the process: clients reconnect, the
+room rehydrates from Redis plus the SFU snapshot with a new `epoch`, and they receive a `resync`.
+Attendance rows and session end are written to Postgres by the bus consumer in `src/writer`.
+Verify the JWT issuer: `TOKEN_ISSUER` must match meeting-api's value (default `meeting-api`).
+
+## Client (the gallery) and end-to-end tests
+
+With `DEV_HARNESS=true` the signaling service serves the browser client at
+`http://localhost:8081/dev/`: a broadcast-gallery view of the room (monitor tiles with tally lamps
+and audio meters, the green room, talk, the control strip, and a tape of the signaling events).
+It is a dev page: the service refuses `DEV_HARNESS=true` under `NODE_ENV=production`.
+Create a meeting with a dev host token, then join from two browser windows with the room code:
+
+```sh
+pnpm dev                                                    # all three services
+TOKEN=$(curl -s -X POST localhost:8080/dev/oidc/token -H 'content-type: application/json' \
+  -d '{"sub":"11111111-1111-4111-8111-111111111111","name":"Host"}' \
+  | node -e 'process.stdin.on("data",d=>console.log(JSON.parse(d).access_token))')
+curl -s -X POST localhost:8080/v1/meetings -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"title":"hello"}' \
+  | node -e 'process.stdin.on("data",d=>console.log(JSON.parse(d).code))'
+```
+
+Paste the token into "host token" on the join screen to join as the host (the green room, mute,
+remove, lock and end are host controls).
+
+The Playwright suite spawns the three services itself (ports 8080, 8081, 9090, media 43000) and
+drives Chromium with fake devices through nine scenarios: a three-party call, the green room,
+host controls, active speakers, layer preferences, reconnect with replay, a signaling restart
+with rehydrate, idle end, and the `/join` error codes.
+
+```sh
+pnpm infra:up
+pnpm e2e:install            # once: downloads Chromium
+pnpm test:e2e
+```
+
+On Linux the downloaded Chromium also needs the system libraries (`libnspr4`, `libnss3`, `libasound2`),
+which `pnpm --filter @zoomclone/e2e exec playwright install-deps chromium` installs with root.
+
+`pnpm check` never runs the browser suite.

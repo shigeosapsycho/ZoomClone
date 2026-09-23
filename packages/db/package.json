@@ -1,0 +1,25 @@
+{
+  "name": "@zoomclone/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "migrate": "node --env-file-if-exists=../../.env --import tsx src/migrate-cli.ts"
+  },
+  "dependencies": {
+    "@zoomclone/protocol": "workspace:*",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.4",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

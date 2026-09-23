@@ -16,7 +16,11 @@ J observability/K8s). Decisions taken with the user in this session:
 - Scope for this pass: **MVP vertical slice A + B + C**. Real multi-party WebRTC call end to end,
   single region, single SFU, local infra. Later slices stack on top without rewrites.
 - Stack: **TypeScript (Node 24) + mediasoup** SFU behind the spec's gRPC contract.
-- Verification: **minimal harness page served at `/dev/` + Playwright** with fake camera/mic.
+- Verification: **client page served at `/dev/` + Playwright** with fake camera/mic. Per the user
+  (mid-session): the client UI must be distinctive, not the generic AI-generated look; visual
+  direction chosen with the `frontend-design` skill when that phase starts. Vanilla TS + CSS,
+  no framework, so the esbuild bundle stays simple.
+- After the MVP works end to end: push the repo to GitHub (remote to be confirmed with the user).
 - Signaling Gateway and Room Controller: **one process, explicit module boundary**. Process
   restart still exercises the Redis rehydrate path (the hard failover case).
 
@@ -63,7 +67,7 @@ ZoomClone/
   packages/
     protocol/    zod schemas for WS envelope + every message, REST DTOs, error codes, JWT claims,
                  meeting code generator/validator, WS close codes. Shared by all services + harness.
-    db/          Drizzle schema (spec 4.1 tables in use), SQL migrations, pg client factory,
+    db/          SQL migrations (spec 4.1 tables in use), postgres.js client factory,
                  migrate script, `endSession(session_id, reason, peak)` (idempotent, shared)
     events/      EventBus interface, event envelope, typed events, InMemoryEventBus
     sfu-proto/   generated TS from proto (committed output)
@@ -86,7 +90,7 @@ Postgres 5432, Redis 6379.
 
 ## Data model
 
-Postgres (Drizzle, mirrors spec 4.1, only tables the slice writes): `meetings`, `meeting_sessions`,
+Postgres (hand-written SQL migrations applied by a small runner, queried through postgres.js; only tables the slice writes): `meetings`, `meeting_sessions`,
 `participants`. Addition to spec: `CREATE UNIQUE INDEX ON meeting_sessions (meeting_id) WHERE ended_at
 IS NULL` so get-or-create of the live session is idempotent under join storms. `recordings` and
 `chat_messages` arrive with their slices.
@@ -128,8 +132,9 @@ reuses a dying session. Pub/sub channel `room:{session_id}:ctl` carries control 
 
 Recordings endpoints: deferred to slice E (not stubbed).
 
-`POST /join` flow: rate limit per IP and per code (10/min, in-memory limiter behind an interface)
--> 429 `RATE_LIMITED`; lookup by code -> 404 `MEETING_NOT_FOUND`; ended/cancelled -> 410 `ENDED`;
+`POST /join` flow: rate limit per IP (10/min, spec) and per code (120/min default, separate
+`JOIN_RATE_LIMIT_PER_CODE`; the spec's 10/min per code would cap a meeting at ten joins a minute),
+in-memory limiter behind an interface -> 429 `RATE_LIMITED`; lookup by code -> 404 `MEETING_NOT_FOUND`; ended/cancelled -> 410 `ENDED`;
 role = bearer.sub == organizer_id ? `host` : `attendee`; get-or-create live session in one
 transaction (on create: `StaticScheduler.place()` -> region, sfu id, signaling url; write
 `home_sfu_id`; meeting -> `live`); if session existed read Redis meta: `status == ended` ->
@@ -157,11 +162,11 @@ Client -> server:
 
 | Type | Payload | Ack payload |
 | --- | --- | --- |
-| `hello` | `{token, resume_seq?, epoch?}` | (push: `welcome` or `resync`) |
+| `hello` | `{token, resume_seq?, epoch?}` | `{mode: welcome \| resync \| replay, epoch, seq}`, then push `welcome`, `resync` or the replayed events |
 | `connect_transport` | `{transport: "send" \| "recv", dtls_parameters}` | `{}` |
 | `publish` | `{kind: audio \| video, source: mic \| camera \| screen \| screen_audio, rtp_parameters, paused?}` | `{track_id}` (server-minted) |
 | `unpublish` | `{track_id}` | `{}` |
-| `subscribe` | `{rtp_capabilities?, track_ids: [], prefs: {track_id: {max_layer, priority, paused?}}}` declarative full set; `rtp_capabilities` required on first call, stored | `{consumers: [{track_id, consumer_id, kind, rtp_parameters, producer_paused}], removed: [track_id]}` |
+| `subscribe` | `{rtp_capabilities?, track_ids: [], prefs: {track_id: {max_layer, priority, paused?}}}` declarative full set; `rtp_capabilities` required on first call, stored | `{consumers: [{track_id, consumer_id, producer_id, kind, rtp_parameters, producer_paused}], removed: [track_id]}` |
 | `consumer_ready` | `{track_id}` (client created its consumer; server unpauses it) | `{}` |
 | `set_media_state` | `{muted?, video_off?}` (stored in roster; server pauses/resumes producers, applies to later publishes too) | `{}` |
 | `raise_hand` / `lower_hand` | `{}` | `{}` |
@@ -174,13 +179,15 @@ Client -> server:
 | `restart_ice` | reserved name, returns `error NOT_IMPLEMENTED` in MVP | |
 | `ping` | `{ts}` every 10 s, 3 missed -> close 4000 | push `pong {ts}` |
 
-Server -> client pushes (seq'd, replayable): `welcome`, `resync`, `participant.joined/.left/
-.updated` (`connected`, `muted`, `video_off`, `hand`, `role`), `track.added/.removed/.updated`
-(`paused`, `layers`), `active_speakers {participant_ids}`, `lobby.request {participant_id, name}`
-(hosts), `lobby.result {admitted}` (waiter), `chat`, `reaction`, `hand`, `room.updated {locked?,
-recording?}`, `room.ended {reason}`. `ack`, `error`, `pong` are not seq'd. Fanout targets are
-resolved by a function over the roster (`all`, `hosts`, `participant`, `all_except`), so group
-targets for breakouts are an addition later.
+Server -> client pushes (seq'd, replayable): `welcome`, `resync`,
+`participant.joined/.left/.updated` (`connected`, `muted`, `video_off`, `hand`, `role`),
+`track.added/.removed/.updated` (`paused` to everyone; `layers` only to the subscriber it concerns:
+spatial layers being delivered, 0 none, 1 low, 2 medium, 3 high), `active_speakers
+{participant_ids}`, `lobby.request {participant_id, name}` (hosts), `lobby.result {admitted}`
+(waiter), `lobby.left {participant_id}` (hosts, when a waiter is denied or disconnects), `chat`,
+`reaction`, `hand`, `room.updated {locked?, recording?}`, `room.ended {reason}`. `ack`, `error`,
+`pong` are not seq'd. Fanout targets are resolved by a function over the roster (`all`, `hosts`,
+`participant`, `all_except`), so group targets for breakouts are an addition later.
 
 Exactly one `welcome` per connection: `{participant_id, role, epoch, seq, state: "joined" | "lobby",
 roster?, tracks?, lobby?, room_meta?, media?}`. `state: "lobby"` carries only the ids. `lobby`
@@ -188,16 +195,20 @@ roster?, tracks?, lobby?, room_meta?, media?}`. `state: "lobby"` carries only th
 (mediasoup transport params: id, ice_parameters, ice_candidates, dtls_parameters). On admit the
 waiter receives `lobby.result {admitted: true}` then a `resync` with the full snapshot and media;
 on deny `lobby.result {admitted: false}` then close 4003. Lobby waiters also receive `room.ended`.
-Waiters count as activity for the idle timer.
+Waiters count as activity for the idle timer. Waiters do not survive a controller restart: the
+rehydrated room drops them and they re-request on their next hello.
 
-Reconnect: `hello {resume_seq, epoch}` within the 30 s grace, with matching epoch, replays events
-targeted to that participant with `seq > resume_seq` from the ring buffer (last 500 events or
-60 s); otherwise `resync`. `epoch` increments on every fresh create or rehydrate, because the
-write-behind checkpoint can lag the live `seq` by up to 50 ms and a restarted controller could
-otherwise reissue numbers clients already saw. A newer connection for the same participant closes
-the older one (4005) without starting the grace timer. Media transports are untouched by signaling
-reconnect. After `resync`, the client compares transport ids with its own and rebuilds transports
-if they changed (SFU room was recreated).
+Reconnect: `hello {resume_seq, epoch}` within the 30 s grace, with matching epoch, replays
+events targeted to that participant with `seq > resume_seq` from the ring buffer (last 500
+events or 60 s); otherwise `resync`. `epoch` increments on every fresh create or rehydrate,
+because the write-behind checkpoint can lag the live `seq` by up to 50 ms and a restarted
+controller could otherwise reissue numbers clients already saw. A newer connection for the same
+participant closes the older one (4005) without starting the grace timer. Media transports are
+untouched by signaling reconnect. After `resync`, the client compares transport ids with its
+own and rebuilds transports if they changed (SFU room was recreated). A resume after the SFU had
+to recreate transports is answered with `resync` (new `media`) even when a replay would otherwise
+be possible. Lobby waiters have no grace: a waiter whose socket closes leaves the lobby at once
+(hosts receive `lobby.left`) and re-requests on the next `hello`.
 
 `departed` map (checkpointed): participant_id -> reason. A `hello` for a departed participant
 closes with the matching code: 4002 removed by host, 4003 lobby denied, 4008 grace expired
@@ -224,7 +235,7 @@ CloseRoom(session_id)                                                     idempo
 CreateTransport(session_id, participant_id, direction) -> transport_id, ice_parameters_json, ice_candidates_json, dtls_parameters_json
 ConnectTransport(transport_id, dtls_parameters_json)                     [added]
 CloseTransport(transport_id)                                             [added]
-RestartIce(transport_id) -> ice_parameters_json                          [added, UNIMPLEMENTED in MVP]
+RestartIce(transport_id) -> ice_parameters_json                          [added, implemented: mediasoup restartIce]
 Publish(session_id, participant_id, transport_id, kind, source, rtp_parameters_json, paused) -> producer_id, track_id, layer_count
 Unpublish(producer_id)
 SetProducerPaused(producer_id, paused)                                   [added: mute / video off]
@@ -237,15 +248,19 @@ Stats(session_id) -> stream StatsEvent
 ```
 
 `StatsEvent` oneof: `snapshot` (always first: transports with `direction`, `ice_state`,
-`dtls_state`; producers with `paused`, `layer_count`; consumers with `preferred_layers`,
-`current_layers`, `priority`, `paused`, `producer_paused`; every entity carries its appData
-`{sfu_id, session_id, participant_id, track_id, kind, source, origin: local | pipe}`),
-`dominant_speakers` (every 300 ms, `[{participant_id, volume}]`), `silence`, `consumer_layers`
-(on `layerschange`), `producer_score`, `producer_closed`, `consumer_closed`, `ice_state`,
-`transport_closed`, `qos` (per transport every `SFU_QOS_INTERVAL_MS`, default 5000: bytes, rtt,
-loss; logged only in MVP). mediasoup blobs travel as JSON strings; ids and enums are typed
-fields. Error mapping: unknown ids `NOT_FOUND`; wrong room `PERMISSION_DENIED`; transport not
-connected or wrong direction `FAILED_PRECONDITION`; mediasoup errors `INTERNAL` with message.
+`dtls_state` and their full client parameters (`ice_parameters`, `ice_candidates`,
+`dtls_parameters` as JSON) so a rehydrated controller can reuse them; producers with `paused`,
+`layer_count`; consumers with `preferred_layers`, `current_layers`, `priority`, `paused`,
+`producer_paused`; every entity carries its appData `{sfu_id, session_id, participant_id, track_id,
+kind, source, origin: local | pipe}`), `dominant_speakers` (every 300 ms, `[{participant_id,
+volume}]`), `silence`, `consumer_layers` (on `layerschange`), `producer_score`, `producer_closed`,
+`consumer_closed`, `ice_state`, `transport_closed`, `qos` (per transport every
+`SFU_QOS_INTERVAL_MS`, default 5000: bytes, rtt, loss; logged only in MVP). mediasoup blobs travel
+as JSON strings; ids and enums are typed fields. Error mapping: unknown ids `NOT_FOUND`; wrong room
+`PERMISSION_DENIED`; wrong transport direction or incompatible capabilities `FAILED_PRECONDITION`
+(Subscribe only needs the recv transport to exist; mediasoup-client connects it on the first
+consume); mediasoup errors `INTERNAL` with message. `room_closed` is internal to the SFU; the
+stream simply ends when the room closes.
 
 ## Components
 
@@ -267,8 +282,8 @@ connected or wrong direction `FAILED_PRECONDITION`; mediasoup errors `INTERNAL` 
 - `stats.ts`: per-room async generator for the `Stats` stream: emit snapshot, then fan
   AudioLevelObserver `volumes`/`silence`, consumer `layerschange`, producer `score`, producer and
   consumer close, transport `icestatechange` / `dtlsstatechange`, periodic `getStats` sample.
-- `main.ts`: http2 server + `connectNodeAdapter`, `/healthz`, prom metrics (`sfu_sessions`,
-  `sfu_egress_bps` from the qos sampler).
+- `main.ts`: http2 server + `connectNodeAdapter`, `/healthz`, prom metrics (`sfu_rooms`,
+  `sfu_transports`).
 
 ### services/meeting-api
 
@@ -277,7 +292,7 @@ connected or wrong direction `FAILED_PRECONDITION`; mediasoup errors `INTERNAL` 
   DEFAULT_REGION, DEFAULT_ORG_ID, SFU_ID, SIGNALING_PUBLIC_URL, STUN_URLS, TURN_URLS, TURN_SECRET.
 - `auth/`: `verifyUser(bearer)`, `signSignalingToken(claims)`, `jwks()`, `devIssuer` plugin.
 - `scheduler.ts`: `Scheduler` interface `{place(meeting): Promise<Placement>}`, `StaticScheduler`.
-- `meetings/`: repository (Drizzle) + service (code gen, session get-or-create tx, status
+- `meetings/`: repository (postgres.js SQL) + service (code gen, session get-or-create tx, status
   transitions, `:end` via `endSession`) + routes. `join/`: rate limiter interface + in-memory
   impl, join service, route.
 - `roomState.ts`: read-only Redis reader for `{room:S}:meta` and roster size.
@@ -330,7 +345,8 @@ connected or wrong direction `FAILED_PRECONDITION`; mediasoup errors `INTERNAL` 
 - `writer/PostgresWriter.ts`: bus consumer. `participant.joined` -> upsert `participants` by id;
   `participant.left` -> `left_at`, `leave_reason` (upsert); `session.ended` -> `endSession`
   (idempotent backup). Batched, retried, never awaited on the message path.
-- `dev/`: harness page (vanilla TS + mediasoup-client, esbuild bundle) served at `/dev/` when
+- `dev/`: client page (vanilla TS + CSS + mediasoup-client, esbuild bundle, distinctive visual
+  design, see Context) served at `/dev/` when
   `DEV_HARNESS=true`. Flow: code + name (+ optional bearer) -> `/join` -> hello -> Device.load ->
   transports -> getUserMedia -> produce (video simulcast 180p/150k, 360p/500k, 720p/1.5M; join
   muted honoured via `paused`) -> declarative subscribe to every track in the roster -> tiles,
@@ -338,6 +354,9 @@ connected or wrong direction `FAILED_PRECONDITION`; mediasoup errors `INTERNAL` 
   reconnect with `resume_seq` + `epoch`, transport rebuild when `resync.media` ids change. Exposes
   `window.__harness` (roster, tracks, seq, epoch, last events, consumer ids, per-consumer
   `getStats` helper) for Playwright.
+  Shipped as "the gallery": monitor tiles with tally lamps and audio meters, a green room, talk,
+  a control strip and a tape of signaling events; `window.__harness` exposes the room view,
+  events, snapshots, consumers, stats, frame counters and a socket drop for Playwright.
 - `metrics.ts`: `ws_connections`, `room_count`, `checkpoint_lag_ms`, `resync_total`,
   `failover_total`.
 
@@ -381,7 +400,9 @@ chat persistence, OTel tracing, Dockerfiles / K8s, webinar mode, dead-media-path
 
 - `docker compose up -d` then `pnpm db:migrate` then `pnpm check` (typecheck, prettier, vitest
   unit + integration across all packages) must pass.
-- `pnpm test:e2e` runs the nine Playwright scenarios headless on Chromium.
+- `pnpm test:e2e` spawns the three services and runs the nine Playwright scenarios headless on
+  Chromium with fake devices (a generated 440 Hz tone with a slow amplitude wobble as the
+  microphone, since Chromium's noise suppression flattens a steady sine).
 - Manual: `pnpm dev`, open `http://localhost:8081/dev/` in two browser windows, create a meeting
   with a dev token, join by code from both, confirm two-way video, mute, hand, chat, host controls,
   active speaker highlight; kill the signaling process and restart it, confirm both windows

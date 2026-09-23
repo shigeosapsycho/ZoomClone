@@ -1,0 +1,39 @@
+{
+  "name": "zoomclone",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "infra:up": "docker compose up -d --wait",
+    "infra:down": "docker compose down",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r --workspace-concurrency=1 test",
+    "test:e2e": "pnpm --filter @zoomclone/e2e test:e2e",
+    "smoke": "pnpm --filter @zoomclone/signaling smoke",
+    "e2e:install": "pnpm --filter @zoomclone/e2e install-browsers",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "pnpm typecheck && pnpm format:check && pnpm test",
+    "db:migrate": "pnpm --filter @zoomclone/db migrate",
+    "dev": "pnpm -r --parallel dev",
+    "proto:gen": "buf generate",
+    "proto:lint": "buf lint"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "1.72.0",
+    "@bufbuild/protoc-gen-es": "2.14.1",
+    "prettier": "3.9.6",
+    "typescript": "5.9.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "mediasoup",
+      "@bufbuild/buf",
+      "protobufjs"
+    ]
+  }
+}
