@@ -1,13 +1,2 @@
-node_modules/
-dist/
-build/
-coverage/
+__pycache__/
 *.log
-.env
-.env.*
-!.env.example
-.DS_Store
-Thumbs.db
-e2e/test-results/
-e2e/playwright-report/
-services/signaling/public/dev/*.js

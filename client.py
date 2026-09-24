@@ -1,7 +1,7 @@
 import argparse
 import json
 
-from common import rpc, setup_logging
+from common import ProtocolError, rpc, setup_logging
 
 logger = setup_logging("client")
 
@@ -20,7 +20,13 @@ def main() -> None:
         "user": args.user,
     }
 
-    response = rpc(args.host, args.port, request, logger)
+    # One-shot request: connect, send, read the reply, close.
+    # A persistent connection (e.g. a chat loop) is future work.
+    try:
+        response = rpc(args.host, args.port, request, logger)
+    except (ConnectionError, ProtocolError, OSError) as exc:
+        logger.error("Could not reach the coordinator at %s:%s: %s", args.host, args.port, exc)
+        return
 
     print("\nServer response:")
     print(json.dumps(response, indent=2))
