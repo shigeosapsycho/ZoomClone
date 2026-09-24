@@ -1,15 +1,6 @@
-import socketserver
 import threading
-from typing import Any
 
-from common import (
-    SERVER_SOCKET_TIMEOUT,
-    ProtocolError,
-    ThreadedTCPServer,
-    read_json,
-    setup_logging,
-    write_json,
-)
+from common import JsonRequestHandler, ThreadedTCPServer, setup_logging
 
 HOST = "0.0.0.0"
 PORT = 5002
@@ -23,35 +14,13 @@ messages = []
 messages_lock = threading.Lock()
 
 
-class MessagingHandler(socketserver.StreamRequestHandler):
-    timeout = SERVER_SOCKET_TIMEOUT  # applied to the socket in setup()
+class MessagingHandler(JsonRequestHandler):
+    logger = logger
 
-    def handle(self) -> None:
-        try:
-            message = read_json(self.rfile)
-        except (ConnectionError, ProtocolError, OSError) as exc:
-            logger.warning("Bad or missing request from %s: %s", self.client_address, exc)
-            self.try_send({"status": "error", "reason": str(exc)})
-            return
+    def handle_request(self, message: dict) -> dict:
+        if message.get("type") != "SYSTEM_MESSAGE":
+            return {"status": "error", "reason": "unknown request type"}
 
-        logger.info("Received from %s -> %s", self.client_address, message)
-
-        match message.get("type"):
-            case "SYSTEM_MESSAGE":
-                response = self.system_message(message)
-            case _:
-                response = {"status": "error", "reason": "unknown request type"}
-
-        logger.info("Sending to %s <- %s", self.client_address, response)
-        self.try_send(response)
-
-    def try_send(self, response: dict[str, Any]) -> None:
-        try:
-            write_json(self.wfile, response)
-        except OSError as exc:
-            logger.warning("%s disconnected before reply: %s", self.client_address, exc)
-
-    def system_message(self, message: dict[str, Any]) -> dict[str, Any]:
         meeting_id = message.get("meeting_id")
         text = message.get("text")
 

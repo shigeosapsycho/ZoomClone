@@ -87,8 +87,8 @@ def rpc(host: str, port: int, request: dict[str, Any], logger: logging.Logger) -
 
 
 class ThreadedTCPServer(socketserver.ThreadingTCPServer):
-    """a configured `socketserver.ThreadingTCPServer` class
-    
+    """A configured `socketserver.ThreadingTCPServer`.
+
     ThreadingTCPServer runs each connection's handle() in its own thread, so one
     slow request (e.g. the coordinator waiting on another service) doesn't block
     everyone else. It also means handlers run in parallel, hence the locks
@@ -96,3 +96,40 @@ class ThreadedTCPServer(socketserver.ThreadingTCPServer):
     """
     allow_reuse_address = True  # restart without "address already in use"
     daemon_threads = True  # handler threads don't block Ctrl+C / exit
+
+
+# socketserver creates one handler instance per incoming connection and calls
+# handle() on it. StreamRequestHandler.setup() first wraps the client socket in
+# self.rfile (buffered reader) and self.wfile (writer), once per connection.
+class JsonRequestHandler(socketserver.StreamRequestHandler):
+    """Reads one JSON request, passes it to handle_request(), and writes one reply.
+
+    Subclasses set `logger` and override handle_request().
+    """
+    timeout = SERVER_SOCKET_TIMEOUT  # applied to the socket in setup()
+    logger: logging.Logger
+
+    def handle_request(self, message: dict) -> dict:
+        """Return the response for one request. Subclasses must override this."""
+        raise NotImplementedError
+
+    def handle(self) -> None:
+        try:
+            message = read_json(self.rfile)
+        except (ConnectionError, ProtocolError, OSError) as exc:
+            self.logger.warning("Bad or missing request from %s: %s", self.client_address, exc)
+            self.try_send({"status": "error", "reason": str(exc)})
+            return
+
+        self.logger.info("Received from %s -> %s", self.client_address, message)
+
+        response = self.handle_request(message)
+
+        self.logger.info("Sending to %s <- %s", self.client_address, response)
+        self.try_send(response)
+
+    def try_send(self, response: dict) -> None:
+        try:
+            write_json(self.wfile, response)
+        except OSError as exc:
+            self.logger.warning("%s disconnected before reply: %s", self.client_address, exc)

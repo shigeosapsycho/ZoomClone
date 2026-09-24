@@ -4,7 +4,7 @@ A minimal distributed prototype: a Coordinator, a Session Service, and a Messagi
 
 ## Required software
 
-- Python 3.10 or newer (the code uses `match` statements).
+- Python 3.10 or newer.
 
 ## Installing dependencies
 
