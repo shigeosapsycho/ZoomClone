@@ -1,8 +1,18 @@
+import io
 import json
 import logging
 import os
 import socket
-from typing import Any, Dict
+import socketserver
+from typing import Any
+
+# Seconds a server-side handler waits for a client that connects but never sends
+# a full line. Overridable so the tests don't have to wait the full 10 seconds.
+SERVER_SOCKET_TIMEOUT = float(os.environ.get("SERVER_SOCKET_TIMEOUT", "10"))
+
+
+class ProtocolError(ValueError):
+    """The peer sent something that is not a single JSON object."""
 
 
 def setup_logging(component: str) -> logging.Logger:
@@ -15,10 +25,7 @@ def setup_logging(component: str) -> logging.Logger:
     if logger.handlers:
         return logger
 
-    formatter = logging.Formatter(
-        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    formatter = logging.Formatter(fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     console = logging.StreamHandler()
     console.setFormatter(formatter)
@@ -33,29 +40,96 @@ def setup_logging(component: str) -> logging.Logger:
     return logger
 
 
-def send_json(sock: socket.socket, message: Dict[str, Any]) -> None:
-    payload = (json.dumps(message) + "\n").encode("utf-8")
-    sock.sendall(payload)
+def write_json(wfile: io.BufferedIOBase, message: dict[str, Any]) -> None:
+    r"""json.dumps never emits a raw newline, so "\n" safely marks the end of the message."""
+    wfile.write((json.dumps(message) + "\n").encode("utf-8"))
+    wfile.flush()
 
 
-def receive_json(sock: socket.socket) -> Dict[str, Any]:
-    # This sample protocol uses exactly one newline-delimited JSON message
-    # in each direction for every TCP connection.
-    with sock.makefile("r", encoding="utf-8") as stream:
-        line = stream.readline()
+def read_json(rfile: io.BufferedIOBase) -> dict[str, Any]:
+    """Read one newline-delimited JSON object from a buffered reader.
+
+    Reuse the same rfile for every message on a connection: its buffer holds any
+    bytes that were read past the newline, which belong to the next message.
+    """
+    line = rfile.readline()
 
     if not line:
         raise ConnectionError("Peer closed the connection before sending a message")
 
-    return json.loads(line)
+    try:
+        message = json.loads(line.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ProtocolError("message is not valid UTF-8") from exc
+    except json.JSONDecodeError as exc:
+        raise ProtocolError("message is not valid JSON") from exc
+
+    if not isinstance(message, dict):
+        raise ProtocolError("expected a JSON object")
+
+    return message
 
 
-def rpc(host: str, port: int, request: Dict[str, Any], logger: logging.Logger) -> Dict[str, Any]:
+# Remote procedure call: one request and one response over a fresh TCP connection.
+def rpc(host: str, port: int, request: dict[str, Any], logger: logging.Logger) -> dict[str, Any]:
     logger.info("Sending to %s:%s -> %s", host, port, request)
 
-    with socket.create_connection((host, port), timeout=5) as sock:
-        send_json(sock, request)
-        response = receive_json(sock)
+    with (
+        socket.create_connection((host, port), timeout=5) as sock,
+        sock.makefile("rb") as rfile,
+        sock.makefile("wb") as wfile,
+    ):
+        write_json(wfile, request)
+        response = read_json(rfile)
 
     logger.info("Received from %s:%s <- %s", host, port, response)
     return response
+
+
+class ThreadedTCPServer(socketserver.ThreadingTCPServer):
+    """A configured `socketserver.ThreadingTCPServer`.
+
+    ThreadingTCPServer runs each connection's handle() in its own thread, so one
+    slow request (e.g. the coordinator waiting on another service) doesn't block
+    everyone else. It also means handlers run in parallel, hence the locks
+    around shared state in the services.
+    """
+    allow_reuse_address = True  # restart without "address already in use"
+    daemon_threads = True  # handler threads don't block Ctrl+C / exit
+
+
+# socketserver creates one handler instance per incoming connection and calls
+# handle() on it. StreamRequestHandler.setup() first wraps the client socket in
+# self.rfile (buffered reader) and self.wfile (writer), once per connection.
+class JsonRequestHandler(socketserver.StreamRequestHandler):
+    """Reads one JSON request, passes it to handle_request(), and writes one reply.
+
+    Subclasses set `logger` and override handle_request().
+    """
+    timeout = SERVER_SOCKET_TIMEOUT  # applied to the socket in setup()
+    logger: logging.Logger
+
+    def handle_request(self, message: dict) -> dict:
+        """Return the response for one request. Subclasses must override this."""
+        raise NotImplementedError
+
+    def handle(self) -> None:
+        try:
+            message = read_json(self.rfile)
+        except (ConnectionError, ProtocolError, OSError) as exc:
+            self.logger.warning("Bad or missing request from %s: %s", self.client_address, exc)
+            self.try_send({"status": "error", "reason": str(exc)})
+            return
+
+        self.logger.info("Received from %s -> %s", self.client_address, message)
+
+        response = self.handle_request(message)
+
+        self.logger.info("Sending to %s <- %s", self.client_address, response)
+        self.try_send(response)
+
+    def try_send(self, response: dict) -> None:
+        try:
+            write_json(self.wfile, response)
+        except OSError as exc:
+            self.logger.warning("%s disconnected before reply: %s", self.client_address, exc)

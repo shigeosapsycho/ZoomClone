@@ -1,57 +1,43 @@
-import socketserver
 import threading
 
-from common import receive_json, send_json, setup_logging
+from common import JsonRequestHandler, ThreadedTCPServer, setup_logging
 
 HOST = "0.0.0.0"
 PORT = 5002
 
 logger = setup_logging("messaging_service")
 
+# Flat log of every message across all meetings. A dict keyed by meeting_id
+# would make per-meeting lookups easier in a later milestone.
 messages = []
+# handle() runs in a separate thread per connection, so shared state needs a lock.
 messages_lock = threading.Lock()
 
 
-class MessagingHandler(socketserver.BaseRequestHandler):
-    def handle(self) -> None:
-        try:
-            request = receive_json(self.request)
-            logger.info("Received from %s -> %s", self.client_address, request)
+class MessagingHandler(JsonRequestHandler):
+    logger = logger
 
-            if request.get("type") != "SYSTEM_MESSAGE":
-                response = {"status": "error", "reason": "unknown request type"}
-            else:
-                meeting_id = request.get("meeting_id")
-                text = request.get("text")
+    def handle_request(self, message: dict) -> dict:
+        if message.get("type") != "SYSTEM_MESSAGE":
+            return {"status": "error", "reason": "unknown request type"}
 
-                if not meeting_id or not text:
-                    response = {
-                        "status": "error",
-                        "reason": "meeting_id and text are required",
-                    }
-                else:
-                    with messages_lock:
-                        messages.append({"meeting_id": meeting_id, "text": text})
-                        count = len(messages)
+        meeting_id = message.get("meeting_id")
+        text = message.get("text")
 
-                    # For Milestone 1 we only log the logical broadcast.
-                    # Actual multicast/fan-out can be added in a later milestone.
-                    logger.info("Broadcast for meeting %s: %s", meeting_id, text)
-                    response = {"status": "ok", "stored_messages": count}
+        if not meeting_id or not text:
+            return {"status": "error", "reason": "meeting_id and text are required"}
 
-            logger.info("Sending to %s <- %s", self.client_address, response)
-            send_json(self.request, response)
+        with messages_lock:
+            messages.append({"meeting_id": meeting_id, "text": text})
+            count = len(messages)
 
-        except Exception as exc:
-            logger.exception("Failed to process request: %s", exc)
-
-
-class Server(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
-    daemon_threads = True
+        # For Milestone 1 we only log the logical broadcast.
+        # Actual multicast/fan-out can be added in a later milestone.
+        logger.info("Broadcast for meeting %s: %s", meeting_id, text)
+        return {"status": "ok", "stored_messages": count}
 
 
 if __name__ == "__main__":
     logger.info("Messaging service listening on %s:%s", HOST, PORT)
-    with Server((HOST, PORT), MessagingHandler) as server:
+    with ThreadedTCPServer((HOST, PORT), MessagingHandler) as server:
         server.serve_forever()
