@@ -156,7 +156,6 @@ python demo.py
 | `demo.py` | Launches four processes, synchronizes demo startup, records proof |
 | `tests/` | Protocol and socket integration tests |
 | `Milestone2_Report.pdf` | Communication design and real test/log evidence |
-| `CONTRIBUTIONS_TEMPLATE.md` | Contribution table to fill with real group work |
 
 ## Short video walkthrough (recommended)
 
