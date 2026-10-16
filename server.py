@@ -44,7 +44,14 @@ class MeetingServer(socketserver.ThreadingTCPServer):
                 listeners.discard(key)
                 if not listeners:
                     del self.subscriptions[topic]
+            targets = [member for (meeting, _), member in self.members.items()
+                       if meeting == session.meeting]
         self.log.info("LEAVE meeting=%s participant=%s", *key)
+        announcement = message("participant_left", sender="server", meeting=session.meeting,
+                               body={"username": session.username,
+                                     "content": f"{session.username} left the meeting."})
+        # Send after releasing the state lock; failed writes can remove other sessions.
+        self.distribute(targets, announcement)
 
     def members_in(self, meeting):
         with self.state_lock:

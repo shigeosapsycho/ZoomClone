@@ -8,6 +8,7 @@ This project implements **the communication mechanisms**, rather than media stre
 - **Request–reply:** `request(list_participants)` and `request(meeting_info)` return a correlated `reply`.
 - **Publish–subscribe:** a participant calls `subscribe(topic)`; a `publish(topic, content)` event is forwarded only to subscribers **within the same meeting**.
 - **Group communication:** `group_send(content)` is forwarded to every participant **within the same meeting**, including the sender.
+- **Departure announcements:** when the server detects a participant disconnect, every remaining participant in that meeting automatically receives a `participant_left` message. No topic subscription is needed; interactive clients display an `ANNOUNCEMENT` such as `charlie left the meeting.`
 - **Marshalling/unmarshalling:** Python dictionaries are serialized to UTF-8 JSON and deserialized on arrival. TCP framing uses **one JSON object per newline**.
 - **Logging:** each process emits UTC timestamps, message identifiers, send/receive messages, and, when enabled, dictionary/byte representations of marshalling operations.
 - **Independent processes:** `demo.py` launches one server and three participant processes (Alice, Bob, Charlie).
@@ -127,6 +128,8 @@ Publish format: `{"type":"publish", "body":{"topic":"meeting.announcements","con
 
 Group format: `{"type":"group_send", "body":{"content":"..."}, ...}`. The broker routes a `group_message` with `sender` and `meeting` fields.
 
+Departure format: `{"type":"participant_left", "sender":"server", "meeting":"demo-room", "body":{"username":"charlie","content":"charlie left the meeting."}, ...}`. The server removes membership and subscriptions before broadcasting this notification, once per disconnected session, to the remaining meeting members. This covers `quit`, closed terminals, and abrupt process exits once TCP reports the disconnection. There is no heartbeat, so a silent network outage may take longer to detect. Reusable `Participant` clients can read these notifications from `inbox` or use `wait_for`.
+
 **Socket transport framing:** Every encoded JSON packet ends in `\n`; the receiver calls `readline` and parses exactly one packet. Maximum 65,536 wire bytes per packet; Unicode is supported.
 
 ## Test cases
@@ -138,6 +141,7 @@ python -m unittest discover -s tests -v
 ```
 
 Tests cover JSON round-trip, Unicode, invalid/truncated data, oversize packets, request–reply, fan-out to **two** subscribers, group delivery to **three** participants, meeting isolation, invalid requests, and duplicate usernames.
+Departure tests also verify automatic notification to all remaining members, meeting isolation, subscription cleanup, duplicate cleanup suppression, and abrupt client process exit.
 
 For complete multi-process smoke testing:
 

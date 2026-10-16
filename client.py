@@ -51,6 +51,9 @@ class Participant:
                         waiter.put(packet)
                         continue
                 self.inbox.put(packet)
+                if self.log and packet["type"] == "participant_left":
+                    self.log.info("ANNOUNCEMENT meeting=%s: %s",
+                                  packet.get("meeting"), packet["body"]["content"])
                 if self.log and packet["type"] in ("event", "group_message"):
                     self.log.info("DELIVERED %s from=%s meeting=%s body=%r",
                                   packet["type"], packet.get("sender"), packet.get("meeting"), packet.get("body"))
