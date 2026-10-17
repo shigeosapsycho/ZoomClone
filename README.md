@@ -34,7 +34,7 @@ This is a *centralized communication broker with independently running network c
 
 Check Python: `python --version` (`python3 --version` on systems where appropriate).
 
-## One-command demo: required for the video
+## One-command demo
 
 From the directory containing `demo.py`:
 
@@ -44,7 +44,7 @@ python demo.py
 
 The program starts **four OS processes**, waits for Bob and Charlie to join and subscribe, and then runs Alice's scenario. It checks that all three participants complete successfully.
 
-Actual machine-generated evidence appears in:
+Demo logs and results are saved in:
 
 ```text
 evidence/demo_run/demo_transcript.txt
@@ -55,7 +55,7 @@ evidence/demo_run/demo_transcript.txt
  evidence/demo_run/*.console.txt
 ```
 
-The transcript includes both `MARSHAL object=... -> wire_bytes=...` and `UNMARSHAL wire_bytes=... -> object=...` trace lines so the recording can show data **before** and **after** marshalling. The demo overwrites only previously generated demo files in `evidence/demo_run` each time.
+The transcript includes both `MARSHAL object=... -> wire_bytes=...` and `UNMARSHAL wire_bytes=... -> object=...` trace lines to help inspect data **before** and **after** marshalling. The demo overwrites only previously generated demo files in `evidence/demo_run` each time.
 
 **Expected behavior:** Alice requests a participant list, publishes a meeting notification, and sends a group chat message. Bob and Charlie independently receive the published event and group message. The `RESULT: PASS` line appears in all three client outputs. Subscriber delivery count is 2; group delivery count is 3 (includes Alice).
 
@@ -132,7 +132,7 @@ Departure format: `{"type":"participant_left", "sender":"server", "meeting":"dem
 
 **Socket transport framing:** Every encoded JSON packet ends in `\n`; the receiver calls `readline` and parses exactly one packet. Maximum 65,536 wire bytes per packet; Unicode is supported.
 
-## Test cases
+## Automated tests
 
 From the project root:
 
@@ -143,7 +143,7 @@ python -m unittest discover -s tests -v
 Tests cover JSON round-trip, Unicode, invalid/truncated data, oversize packets, request–reply, fan-out to **two** subscribers, group delivery to **three** participants, meeting isolation, invalid requests, and duplicate usernames.
 Departure tests also verify automatic notification to all remaining members, meeting isolation, subscription cleanup, duplicate cleanup suppression, and abrupt client process exit.
 
-For complete multi-process smoke testing:
+To verify communication across separate server and client processes, run the one-command demo:
 
 ```sh
 python demo.py
@@ -157,17 +157,17 @@ python demo.py
 | `server.py` | TCP listener, membership, subscription registry, request routing, publish fan-out, group fan-out |
 | `client.py` | Reusable participant API, asynchronous receiver, correlated request/reply, interactive CLI |
 | `demo_node.py` | Deterministic publisher/subscriber scenario executed by one client process |
-| `demo.py` | Launches four processes, synchronizes demo startup, records proof |
+| `demo.py` | Launches four processes, synchronizes demo startup, saves logs and results |
 | `tests/` | Protocol and socket integration tests |
 | `Milestone2_Report.pdf` | Communication design and real test/log evidence |
 
-## Short video walkthrough (recommended)
+## Demo walkthrough
 
-1. Show the architecture and the PDF design report.
-2. Run `python demo.py` and show `RESULT: PASS` outputs.
+1. Review the architecture and the PDF design report.
+2. Run `python demo.py` and check for `RESULT: PASS` outputs.
 3. Open `evidence/demo_run/demo_transcript.txt` and locate `REQUEST_REPLY`, `PUBLISH_REPLY`, two `PUBSUB_RECEIVED` lines, and two `GROUP_RECEIVED` lines.
-4. Show `MARSHAL object=... -> wire_bytes=b'...\\n'` and `UNMARSHAL wire_bytes=... -> object=...` logs.
-5. Identify the protocol, server, client, and demo code files.
+4. Inspect `MARSHAL object=... -> wire_bytes=b'...\\n'` and `UNMARSHAL wire_bytes=... -> object=...` logs.
+5. Explore the protocol, server, client, and demo code files.
 
 ## Known limitations and security assumptions
 
